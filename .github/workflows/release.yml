@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the tag matches both manifests
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for manifest in src/manifest.firefox.json src/manifest.chrome.json; do
+            found="$(node -p "require('./$manifest').version")"
+            if [ "$found" != "$version" ]; then
+              echo "$manifest is $found, but the tag is $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          done
+      - run: node test/test.js
+      - run: ./build.sh
+      - name: Sign the Firefox add-on
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: >-
+          npx --yes web-ext@10.8.0 sign --no-config-discovery
+          --source-dir dist/firefox --artifacts-dir dist/signed
+          --channel unlisted --approval-timeout 3600000
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          xpi="mail-checker-firefox-$version.xpi"
+          mv dist/signed/*.xpi "dist/$xpi"
+          mv dist/mail-checker-chrome.zip "dist/mail-checker-chrome-$version.zip"
+          # Firefox reads this from the latest release to find updates: see update_url in the manifest.
+          jq -n \
+            --arg id "$(node -p "require('./src/manifest.firefox.json').browser_specific_settings.gecko.id")" \
+            --arg version "$version" \
+            --arg link "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$xpi" \
+            '{addons: {($id): {updates: [{version: $version, update_link: $link}]}}}' > dist/updates.json
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            "dist/$xpi" \
+            "dist/mail-checker-chrome-$version.zip" \
+            dist/updates.json

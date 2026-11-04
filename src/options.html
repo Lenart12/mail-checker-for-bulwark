@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mail Checker for Bulwark</title>
+<link rel="icon" href="icon.png">
+<style>
+  /* Bulwark's own colour tokens and login card, from its app/globals.css. */
+  :root {
+    color-scheme: light dark;
+    --background: #ffffff;
+    --foreground: #0f172a;
+    --muted: #f1f5f9;
+    --muted-foreground: #59687c;
+    --border: #e2e8f0;
+    --primary: #185aea;
+    --primary-foreground: #ffffff;
+    --shadow: rgba(0, 0, 0, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: #0a0a0a;
+      --foreground: #fafafa;
+      --muted: #262626;
+      --muted-foreground: #adadad;
+      --border: rgba(128, 128, 128, 0.3);
+      --primary: #fafafa;
+      --primary-foreground: #171717;
+      --shadow: rgba(0, 0, 0, 0.2);
+    }
+  }
+  * { box-sizing: border-box; }
+  /* Embedded in the browser's extension manager by default; .in-tab is the full-page version. */
+  body {
+    margin: 0;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: var(--foreground);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .in-tab body {
+    min-height: 100vh;
+    padding: 64px 16px;
+    justify-content: center;
+    background: linear-gradient(to bottom right, var(--background), color-mix(in srgb, var(--muted) 30%, var(--background)));
+  }
+  main {
+    width: 100%;
+    max-width: 420px;
+    padding: 32px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--background);
+    box-shadow: 0 20px 25px -5px var(--shadow);
+  }
+  #logo { display: block; width: 64px; height: 64px; margin: 0 auto 16px; }
+  h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; text-align: center; }
+  #intro { margin: 0 0 24px; color: var(--muted-foreground); font-size: 14px; text-align: center; }
+  label { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 500; }
+  input, select {
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: inherit;
+    background: color-mix(in srgb, var(--muted) 40%, transparent);
+    font: inherit;
+    font-size: 14px;
+  }
+  select { padding: 0 10px; background: var(--background); }
+  input:focus { outline: 2px solid var(--primary); outline-offset: 1px; background: var(--background); }
+  button {
+    width: 100%;
+    height: 44px;
+    margin-top: 16px;
+    border: 0;
+    border-radius: 6px;
+    color: var(--primary-foreground);
+    background: var(--primary);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
+  button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  h2 { margin: 24px 0 0; padding-top: 24px; border-top: 1px solid var(--border); font-size: 16px; font-weight: 600; }
+  #options > label { margin-top: 16px; }
+  select:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+  label.check { display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
+  input[type="checkbox"] { width: 18px; height: 18px; padding: 0; accent-color: var(--primary); }
+  input[type="range"] { height: 24px; padding: 0; border: 0; background: none; accent-color: var(--primary); }
+  input[type="checkbox"]:focus, input[type="range"]:focus { background: none; }
+  fieldset { margin: 16px 0 0; padding: 0; border: 0; min-width: 0; }
+  legend { padding: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+  .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+  .rules label { font-weight: 400; color: var(--muted-foreground); }
+  @media (max-width: 380px) { .rules { grid-template-columns: 1fr; } }
+  .note { margin: 8px 0 0; color: var(--muted-foreground); font-size: 12px; }
+  #status { min-height: 21px; margin: 16px 0 0; font-size: 14px; text-align: center; }
+  small { display: block; max-width: 420px; margin-top: 16px; color: var(--muted-foreground); font-size: 12px; text-align: center; }
+</style>
+<main>
+  <img id="logo" src="icon.png" alt="">
+  <h1>Mail Checker for Bulwark</h1>
+  <p id="intro">Enter the address of your Bulwark webmail. Your accounts are picked up from wherever you're logged in there.</p>
+  <form id="form">
+    <label for="base">Bulwark address</label>
+    <input id="base" type="text" inputmode="url" required placeholder="mail.example.com" autocomplete="url" autocapitalize="off" spellcheck="false">
+    <button id="connect" type="submit">Connect</button>
+  </form>
+  <p id="status" role="status"></p>
+  <div id="options" hidden>
+    <h2>Options</h2>
+    <label for="notificationContent">Desktop notifications</label>
+    <select id="notificationContent">
+      <option value="full">Sender, subject and preview</option>
+      <option value="subject">Sender and subject</option>
+      <option value="minimal">Just "New mail"</option>
+      <option value="off">Off</option>
+    </select>
+    <label for="overlaySize">Overlay size</label>
+    <select id="overlaySize">
+      <option value="compact">One pane (599px)</option>
+      <option value="wide">Wider layout (800px)</option>
+    </select>
+    <label for="iconClick">Clicking the icon</label>
+    <select id="iconClick">
+      <option value="overlay">Opens the overlay</option>
+      <option value="tab">Opens Bulwark in a tab</option>
+    </select>
+    <label class="check"><input id="wiggle" type="checkbox" checked> Wiggle the icon on new mail</label>
+    <label for="volume">Sound volume: <output id="volumeShown"></output></label>
+    <input id="volume" type="range" min="0" max="100" step="5" value="30">
+    <p class="note">Which sound plays is set in Bulwark, per account. This volume only applies when the extension plays it: an open Bulwark tab that can play it uses its own volume.</p>
+    <h2>Accounts</h2>
+    <div id="accounts"></div>
+    <p class="note"><strong>Always</strong> ignores mutes and Do Not Disturb set in Bulwark. <strong>Never</strong> can't silence an open Bulwark tab, which still follows Bulwark's own settings.</p>
+  </div>
+</main>
+<small>Getting two notifications for each email? Turn off push notifications in Bulwark's settings. This extension sends its own.</small>
+<small>Unofficial extension, not made by the Bulwark project. Needs the full edition of Bulwark; Lite isn't supported.</small>
+<small>Your lookout on the wall.</small>
+<script src="options.js"></script>
+</html>

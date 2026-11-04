@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "Mail Checker for Bulwark",
+  "version": "0.1.0",
+  "description": "New mail notifications and a quick mail overlay for your Bulwark webmail. Unofficial.",
+  "author": "Lenart Kos",
+  "homepage_url": "https://github.com/Lenart12/mail-checker-for-bulwark",
+  "icons": { "128": "icon.png" },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "mail-checker-for-bulwark@extension",
+      "strict_min_version": "140.0",
+      "update_url": "https://github.com/Lenart12/mail-checker-for-bulwark/releases/latest/download/updates.json",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "permissions": ["storage", "notifications", "contextMenus", "scripting", "declarativeNetRequestWithHostAccess"],
+  "optional_permissions": ["*://*/*"],
+  "background": { "scripts": ["host.js", "background.js"], "persistent": true },
+  "browser_action": { "default_title": "Mail Checker for Bulwark", "default_icon": "icon.png" },
+  "options_ui": { "page": "options.html", "open_in_tab": false }
+}
