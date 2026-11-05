@@ -240,7 +240,7 @@
     const decoder = new TextDecoder();
     watcher.cancel = () => reader.cancel().catch(() => {});
     try {
-      // Anything that arrived while disconnected.
+      // Anything that arrived while the stream was opening.
       await update();
       let buffer = '';
       while (!watcher.stopped) {
@@ -288,6 +288,8 @@
       const { list } = await jmap('Mailbox/get', { properties: ['role', 'unreadEmails'] });
       const inbox = list.find((mailbox) => mailbox.role === 'inbox');
       watcher.unread = inbox.unreadEmails;
+      // Nothing left unread, so this account's notifications are out of date. Their links end like this.
+      if (!inbox.unreadEmails) send({ clearNotifications: `?slot=${account.cookieSlot}&owner=${encodeURIComponent(accountId)}` });
       watcher.muted = ruleFor(account.username).badge === 'unmuted'
         && isMuted((await alertSettings(account)).notificationMutes, accountId, inbox.id);
       return inbox.id;
@@ -326,6 +328,8 @@
       await sync();
     };
     watcher.commands = { refresh: update, 'mark-read': () => inTurn(markInboxRead) };
+    // Anything that arrived while disconnected, now rather than once the stream answers, which can take until its first ping.
+    await update();
 
     const eventSourceUrl = session.eventSourceUrl || session.capabilities?.[CAPABILITIES[0]]?.eventSourceUrl;
     if (!eventSourceUrl) throw new Error('The server offers no push stream');
@@ -392,6 +396,7 @@
     send({
       status: 'ok',
       unread: working.reduce((sum, w) => sum + badgeCount(w), 0),
+      counts: all.length > 1 ? working.map((w) => ({ username: w.account.username, unread: badgeCount(w) })) : undefined,
       problems: failing.map(describe),
     });
   }

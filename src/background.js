@@ -103,6 +103,8 @@ function start() {
 }
 
 async function applySettings() {
+  // Ends a pause that ran out while the browser was closed, and sets whether Resume can be chosen.
+  await showPause();
   const { base } = await api.storage.local.get('base');
   await applyClickAction();
   if (!base) {
@@ -119,20 +121,106 @@ function describeProblem({ username, problem, detail }) {
   return problem === 'logged-out' ? `Not logged in: ${username}` : `Can't reach mail: ${username} (${detail})`;
 }
 
-async function showStatus({ status, unread, problems = [] }) {
+const hoursLater = (hours) => (now) => now + hours * 60 * 60 * 1000;
+// Menu entries under "Pause notifications", each with when its pause ends. null: until resumed.
+const PAUSE_CHOICES = {
+  'pause-30m': ['For 30 minutes', hoursLater(0.5)],
+  'pause-1h': ['For 1 hour', hoursLater(1)],
+  'pause-2h': ['For 2 hours', hoursLater(2)],
+  'pause-4h': ['For 4 hours', hoursLater(4)],
+  'pause-8h': ['For 8 hours', hoursLater(8)],
+  'pause-tomorrow': ['Until tomorrow morning', (now) => {
+    const end = new Date(now);
+    end.setDate(end.getDate() + 1);
+    return end.setHours(8, 0, 0, 0);
+  }],
+  'pause-indefinitely': ['Until I resume', () => null],
+};
+
+function pauseLine({ until }) {
+  if (until === null) return 'Notifications paused';
+  const end = new Date(until);
+  const time = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return `Notifications paused until ${end.toDateString() === new Date(Date.now()).toDateString() ? time : `tomorrow ${time}`}`;
+}
+
+// Nothing runs when a pause runs out: it's noticed at the next status, which comes at least every minute.
+async function activePause() {
+  const { pause } = await api.storage.local.get('pause');
+  if (!pause) return null;
+  if (pause.until === null || pause.until > Date.now()) return pause;
+  await endPause();
+  return null;
+}
+
+async function pauseUntil(choice) {
+  await api.storage.local.set({ pause: { until: PAUSE_CHOICES[choice][1](Date.now()) } });
+  await showPause();
+}
+
+// Counts of mail that arrived while paused, by Inbox link. Alerts for several accounts can arrive at once, so in turn.
+let pausedMailQueue = Promise.resolve();
+function updatePausedMail(change) {
+  pausedMailQueue = pausedMailQueue.catch(() => {}).then(async () => {
+    const { pausedMail = {} } = await api.storage.local.get('pausedMail');
+    change(pausedMail);
+    await api.storage.local.set({ pausedMail });
+  });
+  return pausedMailQueue;
+}
+
+// Once, even when an expired pause is noticed in two places at the same time.
+let pauseEnding = null;
+function endPause() {
+  pauseEnding ??= (async () => {
+    await pausedMailQueue;
+    const { pausedMail = {}, base } = await api.storage.local.get(['pausedMail', 'base']);
+    await api.storage.local.remove(['pause', 'pausedMail']);
+    await showPause();
+    const links = Object.keys(pausedMail);
+    const count = Object.values(pausedMail).reduce((sum, n) => sum + n, 0);
+    if (!count || (await getOptions()).notificationContent === 'off') return;
+    api.notifications.create(links.length === 1 ? links[0] : `${base}/mail`, {
+      type: 'basic',
+      iconUrl: await iconUrl(),
+      title: `${count} new message${count === 1 ? '' : 's'} while paused`,
+      message: '',
+    });
+  })().finally(() => { pauseEnding = null; });
+  return pauseEnding;
+}
+
+let lastStatus = null;
+async function showPause() {
+  const paused = Boolean(await activePause());
+  api.contextMenus.update('pause-end', { enabled: paused });
+  if (lastStatus) await showStatus(lastStatus);
+  if (!wiggling) await showRestingIcon();
+}
+
+async function showStatus(message) {
+  lastStatus = message;
+  const { status, unread, counts = [], problems = [] } = message;
+  const perAccount = counts.map((c) => `\n${c.username}: ${c.unread}`).join('');
   const shown = {
-    ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: unread ? 'Mail Checker for Bulwark' : 'No unread mail' },
+    ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: unread ? `${unread} unread${perAccount}` : 'No unread mail' },
     connecting: { text: '…', title: 'Connecting…', color: BADGE_CONNECTING_COLOR },
     'logged-out': { text: '?', title: 'Not logged in. Click to log in to Bulwark.' },
     error: { text: '!', title: 'Can\'t reach your mail. Retrying.' },
   }[status];
+  const pause = await activePause();
   // Some accounts still work: keep their count, and say which ones don't.
   const partial = status === 'ok' && problems.length > 0;
+  // A pause hides the count, since the icon says it's paused, but not a status that needs attention.
+  const count = pause && status === 'ok' ? '' : shown.text;
   action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : shown.color ?? BADGE_COLOR });
-  action.setBadgeText({ text: shown.text || (partial ? '!' : '') });
-  action.setTitle({ title: problems.length ? problems.map(describeProblem).join('\n') : shown.title });
+  action.setBadgeText({ text: count || (partial ? '!' : '') });
+  const lines = problems.map(describeProblem);
+  if (status === 'ok' || !lines.length) lines.push(shown.title);
+  if (pause) lines.unshift(pauseLine(pause));
+  action.setTitle({ title: lines.join('\n') });
 
-  const idle = status !== 'ok' || !unread;
+  const idle = status !== 'ok' || !unread || Boolean(pause);
   if (idle === (await api.storage.local.get('idle')).idle) return;
   await api.storage.local.set({ idle });
   if (!wiggling) await showRestingIcon();
@@ -157,21 +245,44 @@ function toIdleGrey(data) {
   }
 }
 
-function drawIcon({ image, ctx }, angle, idle) {
+// White zZ, top right, clear of the badge. The shadow keeps it readable on light icons and toolbars.
+function drawPauseMark(ctx) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = `bold ${ICON_SIZE * 0.42}px sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+  ctx.shadowBlur = ICON_SIZE * 0.08;
+  ctx.fillStyle = '#ffffff';
+  // Flush with the right edge: with right alignment, this is how far the letter's ink reaches past its anchor.
+  const right = ICON_SIZE - ctx.measureText('Z').actualBoundingBoxRight;
+  ctx.fillText('Z', right, 1);
+  // The small z sits lower, to the left, as in the usual sleeping sign.
+  ctx.fillText('z', right - ctx.measureText('Z').width, ICON_SIZE * 0.14);
+  ctx.shadowColor = 'transparent';
+}
+
+function drawIcon({ image, ctx }, angle, idle, paused = false) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ICON_SIZE, ICON_SIZE);
   ctx.translate(ICON_SIZE / 2, ICON_SIZE / 2);
   ctx.rotate(angle);
   ctx.drawImage(image, -ICON_SIZE / 2, -ICON_SIZE / 2, ICON_SIZE, ICON_SIZE);
-  const pixels = ctx.getImageData(0, 0, ICON_SIZE, ICON_SIZE);
+  let pixels = ctx.getImageData(0, 0, ICON_SIZE, ICON_SIZE);
   if (idle) toIdleGrey(pixels.data);
+  // Drawn after greying, so it stays white.
+  if (paused) {
+    ctx.putImageData(pixels, 0, 0);
+    drawPauseMark(ctx);
+    pixels = ctx.getImageData(0, 0, ICON_SIZE, ICON_SIZE);
+  }
   return action.setIcon({ imageData: { [ICON_SIZE]: pixels } });
 }
 
-// Grey until connected with unread mail.
+// Grey until connected with unread mail, and while paused. A pause can't wiggle, so only this shows its mark.
 async function showRestingIcon() {
-  const { idle = true } = await api.storage.local.get('idle');
-  await drawIcon(await iconCanvas(), 0, idle);
+  const { idle = true, pause } = await api.storage.local.get(['idle', 'pause']);
+  await drawIcon(await iconCanvas(), 0, idle, Boolean(pause));
 }
 
 // The web app manifest points at the instance's branded icon, always as a PNG.
@@ -251,6 +362,19 @@ function notifications(mail, inboxUrl, content) {
   });
 }
 
+// With no ending given, all of them: the overlay is showing the mail. That's only one account, so mail
+// counted during a pause stays counted then.
+async function clearNotifications(ending = '') {
+  for (const id of Object.keys(await api.notifications.getAll())) {
+    if (id.endsWith(ending)) api.notifications.clear(id);
+  }
+  if (ending) {
+    await updatePausedMail((pausedMail) => {
+      for (const link of Object.keys(pausedMail)) if (link.endsWith(ending)) delete pausedMail[link];
+    });
+  }
+}
+
 async function tabCanAlert(tab) {
   try {
     const [{ result }] = await api.scripting.executeScript({ target: { tabId: tab.id }, files: ['tab-can-alert.js'] });
@@ -277,6 +401,11 @@ async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inbo
   const options = await getOptions();
   // The next overlay or tab opens the account this mail is for.
   await api.storage.local.set({ popupUrl: isActiveAccount ? null : inboxUrl });
+  // A pause silences every account, whatever its rules. It's summed up when the pause ends.
+  if (await activePause()) {
+    await updatePausedMail((pausedMail) => { pausedMail[inboxUrl] = (pausedMail[inboxUrl] ?? 0) + mail.length; });
+    return;
+  }
   const icon = await iconUrl();
   for (const { url, title, message } of notifications(mail, inboxUrl, options.notificationContent)) {
     // The id carries the link, so a click still works after this worker restarts.
@@ -305,6 +434,8 @@ function handleMessage(msg) {
   if (msg.status) showStatus(msg);
   if (msg.mail) alertMail(msg);
   if (msg.accounts) rememberAccounts(msg.accounts);
+  if (msg.clearNotifications) clearNotifications(msg.clearNotifications);
+  if (msg.overlayLoad === 'ok') clearNotifications();
 }
 
 api.runtime.onMessage.addListener(handleMessage);
@@ -325,26 +456,36 @@ action.onClicked.addListener(async () => {
     return;
   }
   if (popupUrl) await api.storage.local.set({ popupUrl: null, tabsBehind: true });
+  showInTab(base, popupUrl);
+});
+
+// An open tab keeps what's in it unless given a link. Bulwark asks before leaving a message being written.
+async function showInTab(base, url) {
   const [tab] = await api.tabs.query({ url: matchPattern(base, '/*') });
   if (!tab) {
-    api.tabs.create({ url: popupUrl ?? `${base}/mail` });
+    api.tabs.create({ url: url ?? `${base}/mail` });
     return;
   }
-  // An open tab keeps what's in it, unless new mail for another account needs it.
-  api.tabs.update(tab.id, { active: true, ...(popupUrl ? { url: popupUrl } : {}) });
+  api.tabs.update(tab.id, { active: true, ...(url ? { url } : {}) });
   api.windows.update(tab.windowId, { focused: true });
-});
+}
 
 const MENU_ITEMS = {
   open: 'Open mail',
   compose: 'New message',
   refresh: 'Check for new mail',
   'mark-read': 'Mark Inbox as read',
+  pause: 'Pause notifications',
   settings: 'Settings',
 };
-for (const [id, title] of Object.entries(MENU_ITEMS)) {
+const PAUSE_MENU = [
+  ...Object.entries(PAUSE_CHOICES).map(([id, [title]]) => ({ id, title })),
+  { id: 'pause-separator', type: 'separator' },
+  { id: 'pause-end', title: 'Resume notifications', enabled: false },
+];
+for (const item of [...Object.entries(MENU_ITEMS).map(([id, title]) => ({ id, title })), ...PAUSE_MENU.map((i) => ({ ...i, parentId: 'pause' }))]) {
   api.contextMenus.create(
-    { id, title, contexts: [api.action ? 'action' : 'browser_action'] },
+    { ...item, contexts: [api.action ? 'action' : 'browser_action'] },
     () => void api.runtime.lastError, // Chromium keeps the entries across worker restarts, so these report a duplicate id.
   );
 }
@@ -352,16 +493,21 @@ for (const [id, title] of Object.entries(MENU_ITEMS)) {
 api.contextMenus.onClicked.addListener(async ({ menuItemId }) => {
   const { base } = await api.storage.local.get('base');
   if (menuItemId === 'settings' || !base) openSettings();
-  else if (menuItemId === 'open') api.tabs.create({ url: `${base}/mail` });
+  else if (PAUSE_CHOICES[menuItemId]) pauseUntil(menuItemId);
+  else if (menuItemId === 'pause-end') endPause();
+  else if (menuItemId === 'open') showInTab(base);
   // Bulwark's mailto route: an empty address opens a blank message, and fallback=1 keeps it in this tab.
   else if (menuItemId === 'compose') api.tabs.create({ url: `${base}/protocol/mailto?url=mailto%3A&fallback=1` });
   else if (globalThis.commandWatcher) commandWatcher(menuItemId);
   else api.runtime.sendMessage({ command: menuItemId }).catch(() => {});
 });
 
-api.notifications.onClicked.addListener((id) => {
-  api.tabs.create({ url: id });
+// The id is the link. It selects that message's account, which other open tabs don't follow until they reload.
+api.notifications.onClicked.addListener(async (id) => {
   api.notifications.clear(id);
+  const { base } = await api.storage.local.get('base');
+  await api.storage.local.set({ tabsBehind: true });
+  showInTab(base, id);
 });
 
 api.storage.onChanged.addListener(async (changes) => {

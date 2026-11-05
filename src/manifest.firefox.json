@@ -18,5 +18,6 @@
   "optional_permissions": ["*://*/*"],
   "background": { "scripts": ["host.js", "background.js"], "persistent": true },
   "browser_action": { "default_title": "Mail Checker for Bulwark", "default_icon": "icon.png" },
+  "commands": { "_execute_browser_action": { "description": "Same as clicking the toolbar icon" } },
   "options_ui": { "page": "options.html", "open_in_tab": false }
 }

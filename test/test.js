@@ -289,7 +289,8 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // Connecting shows first, then the real count, even while the stream hasn't answered. Never 0.
   t = run({ authMode: 'basic', inboxMail: [], streamHangs: true });
   await sleep(20);
-  assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => [m.status, m.unread]), [['connecting', undefined], ['ok', 7]]);
+  // The second is the check for missed mail, which doesn't wait for the stream.
+  assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => [m.status, m.unread]), [['connecting', undefined], ['ok', 7], ['ok', 7]]);
 
   // Check for new mail finds it with no push, and racing a push still alerts once.
   t = run({ authMode: 'basic', inboxMail: ['new1'] });
@@ -312,6 +313,10 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.strictEqual(t.marked.length, 7);
   assert.strictEqual(t.sent.filter((m) => m.status).at(-1).unread, 0);
+  assert.ok(t.sent.some((m) => m.clearNotifications === '?slot=2&owner=acc1'), 'nothing unread clears that account\'s notifications');
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  assert.ok(!t.sent.some((m) => m.clearNotifications), 'unread mail keeps them');
 
   // A server that refuses the change doesn't loop forever.
   t = run({ authMode: 'basic', inboxMail: [], stuckMarkRead: true });
@@ -444,6 +449,11 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(mailMessages(t.sent).length, 1, 'catches up from the saved state');
   assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's2' }, 'saves only the state, by login');
 
+  // The catch-up doesn't wait for a stream that hasn't answered yet.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], startState: 's2', emailStates: { '2:u:basic': 's1' }, streamHangs: true });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 1, 'catches up before the stream answers');
+
   // Nothing new since the saved state, or nothing saved yet: no alert, and a first baseline is saved.
   t = run({ authMode: 'basic', inboxMail: ['new1'], startState: 's2', emailStates: { '2:u:basic': 's2' } });
   await sleep(20);
@@ -529,6 +539,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.deepStrictEqual(t.sent.filter((m) => m.status === 'ok').map((m) => m.unread).filter((n) => n !== 14), [], 'no partial count');
   assert.ok(t.sent.some((m) => m.unread === 14));
+  assert.strictEqual(JSON.stringify(t.sent.filter((m) => m.status).at(-1).counts), JSON.stringify([{ username: 'u', unread: 7 }, { username: 'v', unread: 7 }]));
 
   // One login failing keeps the other's count and alerts, and says which one failed.
   t = run({ authMode: 'basic', inboxMail: ['new1'], secondAccount: true, failingSlots: [3] });
@@ -690,19 +701,25 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(summary(from('Ana', 'Bob', 'Cid', 'Cid')), 'To: u\nFrom Cid, Bob and 1 other');
 
   // Accounts alerting together show every notification, with one sound and one wiggle.
-  const cues = { notifications: 0, sounds: 0, wiggles: 0, tabPlays: false, now: 100_000 };
+  const cues = { notifications: 0, sounds: 0, wiggles: 0, tabPlays: false, now: 100_000, cleared: [] };
   Object.assign(backgroundContext, {
     CUE_GAP_MS: 3000,
     Date: { now: () => cues.now },
     api: {
       storage: { local: { set: async () => {} } },
-      notifications: { create() { cues.notifications++; } },
+      notifications: {
+        create() { cues.notifications++; },
+        getAll: async () => ({ 'm1?slot=2&owner=a': true, 'inbox?slot=2&owner=a': true, 'm2?slot=3&owner=a': true }),
+        clear(id) { cues.cleared.push(id); },
+      },
     },
     getOptions: async () => ({ notificationContent: 'full', wiggle: true, volume: 50 }),
     iconUrl: async () => 'icon',
     wiggle() { cues.wiggles++; },
     tabPlaysSound: async () => cues.tabPlays,
     playSound() { cues.sounds++; },
+    activePause: async () => null,
+    updatePausedMail: async () => {},
   });
   backgroundContext.globalThis = backgroundContext;
   vm.runInNewContext(background.slice(background.indexOf('let lastWiggle'), background.indexOf('// The settings page lists these')), backgroundContext);
@@ -716,6 +733,13 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   cues.now += 3000;
   await alertOne();
   assert.deepStrictEqual([cues.notifications, cues.sounds, cues.wiggles], [4, 2, 2], 'later mail cues again');
+
+  // An account with nothing unread loses only its own notifications; a loaded overlay clears them all.
+  await backgroundContext.clearNotifications('?slot=2&owner=a');
+  assert.strictEqual(cues.cleared.join(), 'm1?slot=2&owner=a,inbox?slot=2&owner=a');
+  cues.cleared = [];
+  await backgroundContext.clearNotifications();
+  assert.strictEqual(cues.cleared.length, 3);
 
   // The overlay's message when Bulwark is slow or unreachable.
   const popupHtml = fs.readFileSync(`${__dirname}/../src/popup.html`, 'utf8');
@@ -1190,7 +1214,123 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 0 }), { color: 'red', text: '', title: 'No unread mail' });
   assert.strictEqual((await badgeFor({ status: 'ok', unread: 3 })).text, '3');
   const failedLogin = { username: 'v', problem: 'error', detail: 'x' };
-  assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 3, problems: [failedLogin] }), { color: 'amber', text: '3', title: 'Can\'t reach mail: v (x)' });
+  assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 3, problems: [failedLogin] }), { color: 'amber', text: '3', title: 'Can\'t reach mail: v (x)\n3 unread' });
+  assert.strictEqual((await badgeFor({ status: 'ok', unread: 3 })).title, '3 unread');
+  const counts = [{ username: 'u', unread: 2 }, { username: 'v', unread: 1 }];
+  assert.strictEqual((await badgeFor({ status: 'ok', unread: 3, counts })).title, '3 unread\nu: 2\nv: 1', 'counts each account');
+  assert.strictEqual((await badgeFor({ status: 'logged-out', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)', 'no count when none work');
+
+  // Pausing: silent for every account, a count per account, and firstInbox summary at the end.
+  const paused = { store: { base: 'b' }, created: [], sounds: 0, wiggles: 0, enabled: [], titles: [], now: new Date(2026, 10, 5, 12, 0).getTime() };
+  class PauseDate extends Date {
+    static now() { return paused.now; }
+  }
+  const pauseContext = {
+    Date: PauseDate,
+    MAX_SEPARATE_NOTIFICATIONS: 3,
+    CUE_GAP_MS: 3000,
+    BADGE_COLOR: 'red',
+    BADGE_CONNECTING_COLOR: 'grey',
+    BADGE_PARTIAL_COLOR: 'amber',
+    wiggling: false,
+    api: {
+      storage: {
+        local: {
+          get: async (keys) => Object.fromEntries([keys].flat().filter((k) => k in paused.store).map((k) => [k, structuredClone(paused.store[k])])),
+          set: async (items) => { Object.assign(paused.store, structuredClone(items)); },
+          remove: async (keys) => { for (const k of [keys].flat()) delete paused.store[k]; },
+        },
+      },
+      notifications: { create(id, o) { paused.created.push(`${id} ${o.title}`); }, getAll: async () => ({}), clear() {} },
+      contextMenus: { update(id, { enabled }) { paused.enabled.push(`${id} ${enabled}`); } },
+    },
+    action: {
+      setBadgeBackgroundColor({ color }) { paused.color = color; },
+      setBadgeText({ text }) { paused.badge = text; },
+      setTitle({ title }) { paused.titles.push(title); },
+    },
+    getOptions: async () => ({ notificationContent: paused.content ?? 'full', wiggle: true, volume: 50 }),
+    iconUrl: async () => 'icon',
+    showRestingIcon: async () => {},
+    wiggle() { paused.wiggles++; },
+    tabPlaysSound: async () => false,
+    playSound() { paused.sounds++; },
+  };
+  pauseContext.globalThis = pauseContext;
+  vm.runInNewContext([
+    statusCode,
+    notificationCode,
+    background.slice(background.indexOf('let lastWiggle'), background.indexOf('// The settings page lists these')),
+  ].join('\n'), pauseContext);
+  const inPause = (code) => vm.runInNewContext(code, pauseContext);
+  const alertFor = (inboxUrl, count) => inPause(`alertMail(${JSON.stringify({
+    mail: Array(count).fill({ from: 'Ana', subject: 'Hi', preview: '', url: 'm' }), base: 'b', sound: 's.mp3', inboxUrl,
+  })})`);
+  const firstInbox = 'b/inbox?slot=0&owner=a';
+  const secondInbox = 'b/inbox?slot=1&owner=a';
+
+  await inPause("pauseUntil('pause-1h')");
+  assert.strictEqual(paused.store.pause.until, paused.now + 60 * 60 * 1000);
+  assert.strictEqual(paused.enabled.at(-1), 'pause-end true', 'Resume can be chosen');
+  await Promise.all([alertFor(firstInbox, 2), alertFor(secondInbox, 1)]);
+  assert.deepStrictEqual([paused.created.length, paused.sounds, paused.wiggles], [0, 0, 0], 'silent while paused');
+  assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 2, [secondInbox]: 1 }), 'counts each account, even at once');
+  await inPause("showStatus({ status: 'ok', unread: 3 })");
+  assert.match(paused.titles.at(-1), /^Notifications paused until (?!tomorrow).+\n3 unread$/);
+  assert.deepStrictEqual([paused.badge, paused.store.idle], ['', true], 'no count, and a grey icon');
+  await inPause("showStatus({ status: 'ok', unread: 3, problems: [{ username: 'v', problem: 'logged-out' }] })");
+  assert.deepStrictEqual([paused.badge, paused.color], ['!', 'amber'], 'a failing account still shows');
+  await inPause("showStatus({ status: 'logged-out', problems: [{ username: 'v', problem: 'logged-out' }] })");
+  assert.strictEqual(paused.badge, '?', 'a problem shows over the pause');
+  await inPause("showStatus({ status: 'ok', unread: 3 })");
+  await inPause("clearNotifications('?slot=1&owner=a')");
+  assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 2 }), 'an account read elsewhere drops out');
+  await inPause('clearNotifications()');
+  assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 2 }), 'the overlay doesn\'t clear counts');
+
+  paused.now += 60 * 60 * 1000;
+  paused.titles = [];
+  await inPause("showStatus({ status: 'ok', unread: 3 })");
+  assert.deepStrictEqual(paused.created, [`${firstInbox} 2 new messages while paused`], 'an expired pause ends at the next status');
+  assert.deepStrictEqual([paused.sounds, paused.wiggles], [0, 0], 'the summary is silent');
+  assert.ok(!('pause' in paused.store) && !('pausedMail' in paused.store));
+  assert.strictEqual(paused.enabled.at(-1), 'pause-end false');
+  assert.strictEqual(paused.titles.at(-1), '3 unread');
+  assert.deepStrictEqual([paused.badge, paused.color, paused.store.idle], ['3', 'red', false], 'the count and colour come back');
+  await alertFor(firstInbox, 1);
+  assert.deepStrictEqual([paused.created.length, paused.sounds, paused.wiggles], [2, 1, 1], 'alerts again after the pause');
+
+  // Until resumed: several accounts link to the mail page, and Off or nothing counted show nothing.
+  paused.created = [];
+  paused.now += 10_000;
+  await inPause("pauseUntil('pause-indefinitely')");
+  await inPause("showStatus({ status: 'ok', unread: 0 })");
+  assert.strictEqual(paused.titles.at(-1), 'Notifications paused\nNo unread mail');
+  paused.now += 365 * 24 * 60 * 60 * 1000;
+  await Promise.all([alertFor(firstInbox, 1), alertFor(secondInbox, 1)]);
+  assert.strictEqual(paused.created.length, 0, 'still paused a year later');
+  await inPause('endPause()');
+  assert.deepStrictEqual(paused.created, ['b/mail 2 new messages while paused']);
+  paused.created = [];
+  await inPause("pauseUntil('pause-indefinitely')");
+  await inPause('endPause()');
+  assert.deepStrictEqual(paused.created, [], 'nothing counted, no summary');
+  paused.content = 'off';
+  await inPause("pauseUntil('pause-indefinitely')");
+  await alertFor(firstInbox, 1);
+  await inPause('endPause()');
+  assert.deepStrictEqual(paused.created, [], 'notifications off, no summary');
+  paused.content = undefined;
+
+  // Until tomorrow morning is 08:00 the next day, and the tooltip says tomorrow.
+  await inPause("pauseUntil('pause-tomorrow')");
+  const tomorrow = new Date(paused.now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  assert.strictEqual(paused.store.pause.until, tomorrow.setHours(8, 0, 0, 0));
+  await inPause("showStatus({ status: 'ok', unread: 0 })");
+  assert.match(paused.titles.at(-1), /^Notifications paused until tomorrow /);
+  await inPause("pauseUntil('pause-30m')");
+  assert.strictEqual(paused.store.pause.until, paused.now + 30 * 60 * 1000);
 
   process.exitCode = 0;
   console.log('all checks passed');

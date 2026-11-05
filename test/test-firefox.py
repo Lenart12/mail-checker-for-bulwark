@@ -62,6 +62,9 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
             messages.append(message)
             log.append(f'MESSAGE: {message}')
             return self.reply(200, {})
+        if path == '/command':
+            command, state['command'] = state.get('command', ''), ''
+            return self.reply(200, command, 'text/plain')
         if path == '/app' + TAB_PATH:
             account = {
                 'id': 'login-1', 'cookieSlot': 0, 'username': 'test@x', 'serverUrl': ORIGIN,
@@ -144,6 +147,19 @@ def prepared_extension(folder):
 const report = (m) => fetch('{ORIGIN}/msg?m=' + encodeURIComponent(JSON.stringify(m)));
 browser.runtime.onMessage.addListener((m) => {{ if (m.status || m.mail) report(m); }});
 addEventListener('unhandledrejection', (e) => report({{ unhandled: String(e.reason) }}));
+browser.commands.getAll().then((commands) => report({{ commands: commands.map((c) => c.name) }}));
+const createMenu = browser.contextMenus.create;
+browser.contextMenus.create = (props, done) => createMenu(props, () => {{
+  if (browser.runtime.lastError) report({{ menuError: `${{props.id}}: ${{browser.runtime.lastError.message}}` }});
+  done?.();
+}});
+// The test pauses and resumes through the fake server, as the menu would.
+setInterval(async () => {{
+  const command = await (await fetch('{ORIGIN}/command')).text();
+  if (command === 'pause') await pauseUntil('pause-indefinitely');
+  if (command === 'resume') await endPause();
+  if (command) report({{ done: command, title: await browser.browserAction.getTitle({{}}) }});
+}}, 500);
 const createNotification = browser.notifications.create;
 browser.notifications.create = (id, o) => {{ report({{ notification: o.title, message: o.message }}); return createNotification(id, o); }};
 setTimeout(() => {{ globalThis.playSound = (url, volume) => report({{ extensionPlayed: url, volume }}); }}, 100);""")
@@ -214,6 +230,20 @@ def exercise_addon(browser, extension):
     state['email'] = 's3'
     browser.command('Addon:Install', {'path': extension, 'temporary': True})
     time.sleep(12)
+
+    print('--- paused: new mail stays quiet, and resuming sums it up')
+    state['command'] = 'pause'
+    time.sleep(2)
+    state['email'] = 's4'
+    if state['stream']:
+        try:
+            state['stream'].wfile.write(b'event: state\ndata: {"changed":{"a1":{"Email":"s4"}}}\n\n')
+            state['stream'].wfile.flush()
+        except OSError:
+            pass  # The stream closed; the reconnect finds the mail instead.
+    time.sleep(6)
+    state['command'] = 'resume'
+    time.sleep(2)
     return locks_during_token_request
 
 
@@ -226,6 +256,21 @@ def failures(locks_during_token_request):
             found.append(f'unhandled rejection: {message["unhandled"]}')
         if message.get('problems') or message.get('status') in ('error', 'logged-out'):
             found.append(f'reported a problem: {message}')
+    for message in messages:
+        if 'menuError' in message:
+            found.append(f'a menu entry failed: {message["menuError"]}')
+    done = [i for i, message in enumerate(messages) if 'done' in message]
+    if len(done) != 2:
+        found.append(f'pause and resume did not both run: {[messages[i] for i in done]}')
+    elif json.loads(RULES).get('test@x', {}).get('notify') != 'never':
+        if not messages[done[0]]['title'].startswith('Notifications paused'):
+            found.append(f'the tooltip does not show the pause: {messages[done[0]]["title"]!r}')
+        # Resuming creates the summary before it reports back.
+        notified = [m['notification'] for m in messages[done[0]:done[1]] if 'notification' in m]
+        if notified != ['1 new message while paused']:
+            found.append(f'expected only the summary between pausing and resuming: {notified}')
+    if not any('_execute_browser_action' in message.get('commands', []) for message in messages):
+        found.append('the toolbar shortcut is not offered')
     if LOGIN_METHOD == 'oauth' and 'bulwark-token-refresh:0' not in locks_during_token_request:
         found.append(f'the lock was not held during the token request: {locks_during_token_request}')
     rules = json.loads(RULES).get('test@x', {})

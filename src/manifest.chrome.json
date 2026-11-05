@@ -11,5 +11,6 @@
   "optional_host_permissions": ["*://*/*"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Mail Checker for Bulwark", "default_icon": "icon.png" },
+  "commands": { "_execute_action": { "description": "Same as clicking the toolbar icon" } },
   "options_ui": { "page": "options.html", "open_in_tab": false }
 }
