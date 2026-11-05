@@ -53,7 +53,7 @@ The extension sends its own notifications, separately from Bulwark. If you've al
 ## Privacy and security
 
 - The extension only talks to your Bulwark server and the mail server it uses, and collects nothing. It asks for permission for your Bulwark host only.
-- Your password and tokens stay in a hidden frame on your Bulwark address, in memory. The extension saves only your account names, its settings and your server's icon.
+- Your password and tokens stay in a hidden frame on your Bulwark address, in memory. The extension saves only your account names, its settings, your server's icon and its position in each account's change history, which holds no mail content.
 - To show Bulwark in the overlay, the extension removes `Content-Security-Policy` and `X-Frame-Options` from the Bulwark pages it opens itself. Normal Bulwark tabs keep them. HTML mail is still sanitized and sandboxed by Bulwark, but the overlay loses CSP as an outer layer of protection.
 - An `http://` address sends your password and mail unencrypted. The settings page warns about this.
 
@@ -62,7 +62,7 @@ The extension sends its own notifications, separately from Bulwark. If you've al
 - It relies on internal Bulwark details, so a Bulwark update can break it. Tested with Bulwark 1.20.0.
 - Bulwark plugins that use their own frames won't load in the overlay.
 - With Bulwark's Offline mode on, mail can't show in the overlay, because its service worker keeps the headers that stop framing. The overlay offers **Open in a tab** instead.
-- There are no alerts for mail that arrived while the browser was closed, though the unread count includes it.
+- Mail that arrived while the browser was closed alerts at the next start, unless you've been away longer than your server keeps its change history. The unread count still includes it.
 
 ## Development
 

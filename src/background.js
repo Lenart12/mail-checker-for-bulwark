@@ -3,6 +3,7 @@ const api = globalThis.browser ?? chrome;
 const action = api.action ?? api.browserAction;
 const RULE_ID = 1;
 const MAX_SEPARATE_NOTIFICATIONS = 3;
+const CUE_GAP_MS = 3000; // Each account alerts on its own, so at startup they arrive together.
 const BADGE_COLOR = '#d93025';
 const BADGE_PARTIAL_COLOR = '#b45309';
 const BADGE_CONNECTING_COLOR = '#6b7280';
@@ -228,12 +229,20 @@ function recipient(mail) {
   return mail.username ? `To: ${mail.username}\n` : '';
 }
 
+// Newest first, each sender once: "From Ana, Bob and 2 others".
+function senders(mail) {
+  const names = [...new Set(mail.map((m) => m.from).reverse())];
+  if (names.length <= 2) return `From ${names.join(' and ')}`;
+  const rest = names.length - 2;
+  return `From ${names[0]}, ${names[1]} and ${rest} other${rest === 1 ? '' : 's'}`;
+}
+
 function notifications(mail, inboxUrl, content) {
   if (content === 'off') return [];
   if (mail.length > MAX_SEPARATE_NOTIFICATIONS) {
     const title = `${mail.length} new messages`;
     if (content === 'minimal') return [{ url: inboxUrl, title, message: '' }];
-    return [{ url: inboxUrl, title, message: `${recipient(mail[0])}${mail[0].subject}` }];
+    return [{ url: inboxUrl, title, message: `${recipient(mail[0])}${senders(mail)}` }];
   }
   return mail.map((m) => {
     if (content === 'minimal') return { url: m.url, title: 'New mail', message: '' };
@@ -262,6 +271,8 @@ async function tabPlaysSound(base, tabMayAlert) {
   return (await Promise.all(tabs.map(tabCanAlert))).includes(true);
 }
 
+let lastWiggle = 0;
+let lastSound = 0;
 async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inboxUrl, reducedMotion }) {
   const options = await getOptions();
   // The next overlay or tab opens the account this mail is for.
@@ -271,8 +282,12 @@ async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inbo
     // The id carries the link, so a click still works after this worker restarts.
     api.notifications.create(url, { type: 'basic', iconUrl: icon, title, message });
   }
-  if (options.wiggle && !reducedMotion) wiggle();
-  if (sound && options.volume > 0 && !(await tabPlaysSound(base, tabMayAlert))) {
+  if (options.wiggle && !reducedMotion && Date.now() - lastWiggle >= CUE_GAP_MS) {
+    lastWiggle = Date.now();
+    wiggle();
+  }
+  if (sound && options.volume > 0 && !(await tabPlaysSound(base, tabMayAlert)) && Date.now() - lastSound >= CUE_GAP_MS) {
+    lastSound = Date.now();
     const url = `${base}/notification/${sound}`;
     const volume = options.volume / 100;
     if (globalThis.playSound) playSound(url, volume);

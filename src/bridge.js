@@ -6,7 +6,7 @@
   const base = location.href.replace(/\/api\/version.*$/, '');
   const CAPABILITIES = ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'];
   const MAX_CHANGE_PAGES = 5;
-  const MARK_READ_BATCH = 100;
+  const BATCH_SIZE = 100;
   // Stalwart answers a stored password with 402 once the account has 2FA. Renewing can't help that, so only 401 retries.
   const LOGIN_REFUSED = new Set([401, 402]);
   const STREAM_SILENCE_MS = 90_000; // Three missed 30s pings.
@@ -127,6 +127,7 @@
 
   // Per-account rules from the extension's settings: 'always', 'unmuted' or 'never'.
   let accountRules = {};
+  let emailStates = {};
   const ruleFor = (username) => ({ ...DEFAULT_RULES, ...accountRules[username] });
 
   function isMuted(mutes, accountId, mailboxId) {
@@ -145,10 +146,14 @@
   }
 
   async function alertNewMail(account, jmap, accountId, inbox, created) {
-    const { list } = await jmap('Email/get', {
-      ids: created,
-      properties: ['from', 'subject', 'preview', 'mailboxIds', 'keywords'],
-    });
+    // A long absence can leave more than the server takes in one request.
+    const list = [];
+    for (let i = 0; i < created.length; i += BATCH_SIZE) {
+      list.push(...(await jmap('Email/get', {
+        ids: created.slice(i, i + BATCH_SIZE),
+        properties: ['from', 'subject', 'preview', 'mailboxIds', 'keywords', 'receivedAt'],
+      })).list);
+    }
     const rule = ruleFor(account.username).notify;
     if (rule === 'never') return;
     const settings = await alertSettings(account);
@@ -156,7 +161,9 @@
       && !isMuted(settings.notificationMutes, accountId, inbox);
     if (!bulwarkAlerts && rule !== 'always') return;
     const mail = list
-      .filter((email) => email.mailboxIds?.[inbox] && !email.keywords?.$draft)
+      .filter((email) => email.mailboxIds?.[inbox] && !email.keywords?.$draft && !email.keywords?.$seen)
+      // Oldest first, so the newest notification ends up on top. The server's order isn't guaranteed.
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
       .map((email) => summarize(email, account, accountId));
     if (!mail.length) return;
     // Bulwark's "default" beep is synthesized, so it plays as the involved file. An oscillator would match it.
@@ -177,7 +184,16 @@
     });
   }
 
-  // Same rule as Bulwark's reportNewInboxMail: created since the baseline, in the Inbox, not a draft.
+  // Saved so that mail that arrives while the browser is closed still alerts at the next start.
+  function setEmailState(watcher, state) {
+    watcher.emailState = state;
+    if (emailStates[watcher.key] === state) return;
+    emailStates[watcher.key] = state;
+    api.storage.local.set({ emailStates }).catch(() => {});
+  }
+
+  // Bulwark's reportNewInboxMail rule: created since the baseline, in the Inbox, not a draft. Also not
+  // already read, because mail found after time away may have been read on another device.
   // The baseline only moves once the alert is out, so a failed request tries the same mail again.
   async function reportNewMail(watcher, jmap, accountId, inbox) {
     const created = [];
@@ -189,7 +205,7 @@
       });
       if (!delta) {
         // The baseline is too old for the server; start over from here.
-        watcher.emailState = (await jmap('Email/get', { ids: [] })).state;
+        setEmailState(watcher, (await jmap('Email/get', { ids: [] })).state);
         return;
       }
       created.push(...delta.created);
@@ -197,7 +213,7 @@
       if (!delta.hasMoreChanges) break;
     }
     if (created.length) await alertNewMail(watcher.account, jmap, accountId, inbox, created);
-    watcher.emailState = state;
+    setEmailState(watcher, state);
   }
 
   // The server may report a base it can't be reached on behind a proxy, so like Bulwark, use the origin
@@ -279,7 +295,8 @@
 
     let inbox = await readMailboxes();
     report();
-    watcher.emailState ??= (await jmap('Email/get', { ids: [] })).state;
+    watcher.emailState ??= emailStates[watcher.key];
+    if (!watcher.emailState) setEmailState(watcher, (await jmap('Email/get', { ids: [] })).state);
 
     // Push events and menu commands take turns, or one message could alert twice.
     const inTurn = (task) => {
@@ -297,7 +314,7 @@
       for (;;) {
         const { ids } = await jmap('Email/query', {
           filter: { inMailbox: inbox, notKeyword: '$seen' },
-          limit: MARK_READ_BATCH,
+          limit: BATCH_SIZE,
         });
         if (!ids.length) break;
         const result = await jmap('Email/set', {
@@ -390,10 +407,15 @@
       watcher.cancel?.();
       watchers.delete(key);
     }
+    const gone = Object.keys(emailStates).filter((key) => !keys.has(key));
+    if (gone.length) {
+      for (const key of gone) delete emailStates[key];
+      api.storage.local.set({ emailStates }).catch(() => {});
+    }
     for (const account of accounts) {
       const key = keyOf(account);
       if (watchers.has(key)) continue;
-      const watcher = { account, delay: RECONNECT_DELAY_MS };
+      const watcher = { account, key, delay: RECONNECT_DELAY_MS };
       watchers.set(key, watcher);
       watch(watcher);
     }
@@ -434,9 +456,10 @@
   }
 
   // Scripts match every port of the host, because match patterns can't name one. Only the saved address counts.
-  api.storage.local.get(['base', 'accountRules']).then((saved) => {
+  api.storage.local.get(['base', 'accountRules', 'emailStates']).then((saved) => {
     if (!location.href.startsWith(`${saved.base}/api/version`)) return;
     accountRules = saved.accountRules ?? {};
+    emailStates = saved.emailStates ?? {};
     window.addEventListener('storage', (event) => {
       if (event.key === 'account-registry') syncAccounts();
     });

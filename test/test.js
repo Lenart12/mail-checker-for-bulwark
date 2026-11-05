@@ -26,8 +26,12 @@ function run({
   timeScale = 1,
   frameUrl = 'https://mail.test/webmail/api/version',
   sessionOverrides = {},
+  emailStates,
+  startState = 's1',
 }) {
   const calls = [];
+  const emailGetSizes = [];
+  let savedStates = emailStates;
   const planned = [];
   let cancelledStreams = 0;
   let markReadRequests = 0;
@@ -38,15 +42,18 @@ function run({
   let pushChunk;
   let tokenRenewals = 0;
   let validAuth = tokenExpired ? 'Bearer new' : 'Bearer old';
-  let serverState = 's1';
+  let serverState = startState;
   let cachedTokenReads = 0;
   const unreadIds = Array.from({ length: 7 }, (_, i) => `u${i}`);
   const marked = [];
   const emails = {
-    new1: { id: 'new1', from: [{ name: 'Ana' }], subject: 'Hi', preview: 'Hello', mailboxIds: { inbox1: true }, keywords: {} },
+    new1: { id: 'new1', from: [{ name: 'Ana' }], subject: 'Hi', preview: 'Hello', mailboxIds: { inbox1: true }, keywords: {}, receivedAt: '2026-11-05T10:00:00Z' },
+    old1: { id: 'old1', from: [], subject: 'Earlier', mailboxIds: { inbox1: true }, keywords: {}, receivedAt: '2026-11-05T09:00:00Z' },
     draft1: { id: 'draft1', from: [], subject: 'D', mailboxIds: { inbox1: true }, keywords: { $draft: true } },
     other1: { id: 'other1', from: [], subject: 'O', mailboxIds: { spam1: true }, keywords: {} },
+    seen1: { id: 'seen1', from: [], subject: 'S', mailboxIds: { inbox1: true }, keywords: { $seen: true } },
   };
+  const bulkEmail = (id) => ({ id, from: [], subject: 'B', mailboxIds: { inbox1: true }, keywords: {}, receivedAt: '2026-11-05T08:00:00Z' });
 
   const fetchFake = async (url, init = {}) => {
     calls.push({ url, method: init.method ?? 'GET' });
@@ -121,7 +128,8 @@ function run({
       return json(200, { methodResponses: [[method, { created, newState: serverState, hasMoreChanges: false }, tag]] });
     }
     if (args.ids.length === 0) return json(200, { methodResponses: [[method, { state: serverState, list: [] }, tag]] });
-    return json(200, { methodResponses: [[method, { list: args.ids.map((id) => emails[id]) }, tag]] });
+    emailGetSizes.push(args.ids.length);
+    return json(200, { methodResponses: [[method, { list: args.ids.map((id) => emails[id] ?? bulkEmail(id)) }, tag]] });
   };
 
   const store = {
@@ -149,7 +157,10 @@ function run({
     chrome: {
       runtime: { sendMessage: async (message) => { sent.push(message); } },
       storage: {
-        local: { get: async () => ({ accountRules, base: 'https://mail.test/webmail' }) },
+        local: {
+          get: async () => ({ accountRules, emailStates, base: 'https://mail.test/webmail' }),
+          set: async (items) => { savedStates = JSON.parse(JSON.stringify(items.emailStates)); },
+        },
         onChanged: { addListener: (fn) => { listeners.rules = fn; } },
       },
     },
@@ -206,6 +217,8 @@ function run({
     endStream,
     unreadIds,
     marked,
+    emailGetSizes,
+    savedStates: () => savedStates,
     tokenRenewals: () => tokenRenewals,
     cancelledStreams: () => cancelledStreams,
     markReadRequests: () => markReadRequests,
@@ -425,6 +438,52 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(mailMessages(t.sent).length, 0);
   assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
 
+  // Mail that arrived while the browser was closed alerts at the start, with no push.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], startState: 's2', emailStates: { '2:u:basic': 's1' } });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 1, 'catches up from the saved state');
+  assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's2' }, 'saves only the state, by login');
+
+  // Nothing new since the saved state, or nothing saved yet: no alert, and a first baseline is saved.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], startState: 's2', emailStates: { '2:u:basic': 's2' } });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 0);
+  t = run({ authMode: 'basic', inboxMail: ['new1'] });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 0);
+  assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's1' });
+
+  // Mail comes oldest first, whatever order the server lists it in.
+  t = run({ authMode: 'basic', inboxMail: ['new1', 'old1'], startState: 's2', emailStates: { '2:u:basic': 's1' } });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent)[0].mail.map((m) => m.subject).join(), 'Earlier,Hi');
+
+  // A saved state the server has forgotten can't alert, and is replaced.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], startState: 's9', emailStates: { '2:u:basic': 'old' } });
+  t.failNext('Email/changes', 'cannotCalculateChanges');
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 0);
+  assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's9' });
+
+  // A login that's gone loses its saved state.
+  t = run({ authMode: 'basic', inboxMail: [], emailStates: { '2:u:basic': 's1', '9:gone:basic': 's1' } });
+  await sleep(20);
+  assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's1' });
+
+  // Mail already read, say on a phone, doesn't alert.
+  t = run({ authMode: 'basic', inboxMail: ['seen1'], startState: 's2', emailStates: { '2:u:basic': 's1' } });
+  await sleep(20);
+  assert.strictEqual(mailMessages(t.sent).length, 0);
+  assert.deepStrictEqual(t.savedStates(), { '2:u:basic': 's2' }, 'still moves the baseline');
+
+  // A long absence fetches in batches, but alerts once.
+  const manyIds = Array.from({ length: 250 }, (_, i) => `bulk${i}`);
+  t = run({ authMode: 'basic', inboxMail: manyIds, startState: 's2', emailStates: { '2:u:basic': 's1' } });
+  await sleep(20);
+  assert.deepStrictEqual(t.emailGetSizes, [100, 100, 50]);
+  assert.strictEqual(mailMessages(t.sent).length, 1);
+  assert.strictEqual(mailMessages(t.sent)[0].mail.length, 250);
+
   // A request that never answers times out, and the watcher recovers.
   t = run({ authMode: 'basic', inboxMail: ['new1'], timeScale: 0.01 });
   await sleep(20);
@@ -621,8 +680,42 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(notify([one], 'minimal'), [{ url: 'link', title: 'New mail', message: '' }]);
   assert.deepStrictEqual(notify([one], 'off'), []);
   const many = [one, one, one, one];
+  assert.deepStrictEqual(notify(many, 'off'), []);
   assert.deepStrictEqual(notify(many, 'minimal'), [{ url: 'inbox', title: '4 new messages', message: '' }]);
-  assert.deepStrictEqual(notify(many, 'subject'), [{ url: 'inbox', title: '4 new messages', message: 'To: u\nHi' }]);
+  assert.deepStrictEqual(notify(many, 'subject'), [{ url: 'inbox', title: '4 new messages', message: 'To: u\nFrom Ana' }]);
+  const from = (...names) => names.map((name) => ({ ...one, from: name }));
+  const summary = (mail) => notify(mail, 'full')[0].message;
+  assert.strictEqual(summary(from('Ana', 'Bob', 'Ana', 'Bob')), 'To: u\nFrom Bob and Ana', 'newest first, each once');
+  assert.strictEqual(summary(from('Ana', 'Bob', 'Cid', 'Dan')), 'To: u\nFrom Dan, Cid and 2 others');
+  assert.strictEqual(summary(from('Ana', 'Bob', 'Cid', 'Cid')), 'To: u\nFrom Cid, Bob and 1 other');
+
+  // Accounts alerting together show every notification, with one sound and one wiggle.
+  const cues = { notifications: 0, sounds: 0, wiggles: 0, tabPlays: false, now: 100_000 };
+  Object.assign(backgroundContext, {
+    CUE_GAP_MS: 3000,
+    Date: { now: () => cues.now },
+    api: {
+      storage: { local: { set: async () => {} } },
+      notifications: { create() { cues.notifications++; } },
+    },
+    getOptions: async () => ({ notificationContent: 'full', wiggle: true, volume: 50 }),
+    iconUrl: async () => 'icon',
+    wiggle() { cues.wiggles++; },
+    tabPlaysSound: async () => cues.tabPlays,
+    playSound() { cues.sounds++; },
+  });
+  backgroundContext.globalThis = backgroundContext;
+  vm.runInNewContext(background.slice(background.indexOf('let lastWiggle'), background.indexOf('// The settings page lists these')), backgroundContext);
+  const alertOne = () => backgroundContext.alertMail({ mail: [one], base: 'b', sound: 's.mp3', inboxUrl: 'inbox' });
+  cues.tabPlays = true;
+  await alertOne();
+  assert.strictEqual(cues.sounds, 0, 'a sound left to a tab doesn\'t count as played');
+  cues.tabPlays = false;
+  await Promise.all([alertOne(), alertOne()]);
+  assert.deepStrictEqual([cues.notifications, cues.sounds, cues.wiggles], [3, 1, 1]);
+  cues.now += 3000;
+  await alertOne();
+  assert.deepStrictEqual([cues.notifications, cues.sounds, cues.wiggles], [4, 2, 2], 'later mail cues again');
 
   // The overlay's message when Bulwark is slow or unreachable.
   const popupHtml = fs.readFileSync(`${__dirname}/../src/popup.html`, 'utf8');

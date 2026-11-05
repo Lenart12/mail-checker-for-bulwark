@@ -125,7 +125,7 @@ def jmap_response(name, args, tag):
         return [name, {'created': created, 'newState': state['email'], 'hasMoreChanges': False}, tag]
     if name == 'Email/get' and not args['ids']:
         return [name, {'state': state['email'], 'list': []}, tag]
-    email = {'id': 'm1', 'from': [{'name': 'Ana'}], 'subject': 'Hi', 'preview': 'p', 'mailboxIds': {'in': True}, 'keywords': {}}
+    email = {'id': 'm1', 'from': [{'name': 'Ana'}], 'subject': 'Hi', 'preview': 'p', 'mailboxIds': {'in': True}, 'keywords': {}, 'receivedAt': '2026-11-05T10:00:00Z'}
     return [name, {'list': [email]}, tag]
 
 
@@ -208,6 +208,12 @@ def exercise_addon(browser, extension):
         state['stream'].wfile.write(b'event: state\ndata: {"changed":{"a1":{"Email":"s2"}}}\n\n')
         state['stream'].wfile.flush()
     time.sleep(4)
+
+    print('--- new mail arrives while the add-on is away, and no push announces it')
+    state['alerts_before_reload'] = sum('mail' in message for message in messages)
+    state['email'] = 's3'
+    browser.command('Addon:Install', {'path': extension, 'temporary': True})
+    time.sleep(12)
     return locks_during_token_request
 
 
@@ -225,6 +231,8 @@ def failures(locks_during_token_request):
     rules = json.loads(RULES).get('test@x', {})
     if rules.get('notify') != 'never' and not any('mail' in message for message in messages):
         found.append('no new mail alert was sent')
+    if rules.get('notify') != 'never' and sum('mail' in message for message in messages) <= state['alerts_before_reload']:
+        found.append('no alert for mail that arrived while the add-on was away')
     if rules.get('notify') == 'never' and any('mail' in message for message in messages):
         found.append('an alert was sent despite the never rule')
     return found
