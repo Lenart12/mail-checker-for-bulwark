@@ -6,6 +6,7 @@ const SLOW_LOAD_MS = 5000;
 const RETRY_SECONDS = 15;
 const REQUEST_REPORT_MS = 200;
 const CANCELLED_ERRORS = ['net::ERR_ABORTED', 'NS_BINDING_ABORTED'];
+const LOCALE_SEGMENT = /^\/[a-z]{2}(-[A-Za-z]{2,4})?(?=\/)/;
 
 function watchLoad(base, frameUrl) {
   const loading = document.getElementById('loading');
@@ -14,39 +15,40 @@ function watchLoad(base, frameUrl) {
   const openTab = document.getElementById('open-tab');
   const frame = document.getElementById('mail');
   openTab.href = frameUrl;
-  let report = null; // What this load's request said: 'ok', 'failed', 'worker' or 'offline'.
+  let report = null; // What's known about this load: 'ok', 'failed', 'worker' or 'offline'.
   let workerAwake = false;
   let slowTimer;
   let countdown = null;
   let lastHint = null;
 
   // The watcher may not have noticed yet, so a load's result is a reason for it to check.
-  const hintWatcher = (overlayLoad) => {
+  function hintWatcher(overlayLoad) {
     if (overlayLoad === lastHint) return;
     lastHint = overlayLoad;
     api.runtime.sendMessage({ overlayLoad }).catch(() => {});
-  };
-  const showTrouble = () => {
+  }
+  function showTrouble() {
     trouble.textContent = `Having trouble connecting to ${new URL(base).host}`;
-  };
-  const stopCountdown = () => {
+  }
+  function stopCountdown() {
     clearInterval(countdown);
     countdown = null;
     retry.textContent = '';
-  };
-  const startLoad = () => {
+  }
+  function startLoad(awake = false) {
     report = null;
+    workerAwake = awake;
     // Once the server has answered, a slow page only gets the message: another try would cut it off.
-    slowTimer = setTimeout(() => (report ? showTrouble() : startCountdown()), SLOW_LOAD_MS);
+    slowTimer = setTimeout(() => (report === 'ok' ? showTrouble() : showFailure()), SLOW_LOAD_MS);
     frame.src = frameUrl;
-  };
-  const startCountdown = () => {
+  }
+  function showFailure() {
     showTrouble();
     openTab.hidden = false;
     hintWatcher('failed');
     if (countdown) return;
     let seconds = RETRY_SECONDS;
-    const tick = () => {
+    function tick() {
       if (seconds > 0) {
         retry.textContent = `Retrying in ${seconds}s`;
         seconds -= 1;
@@ -54,15 +56,14 @@ function watchLoad(base, frameUrl) {
       }
       stopCountdown();
       retry.textContent = 'Retrying now';
-      workerAwake = false;
       startLoad();
-    };
+    }
     tick();
     countdown = setInterval(tick, 1000);
-  };
+  }
   // Offline mode has the worker answer every load, so the browser will always refuse to show the page here.
   // A tab can show it, and the saved copy too if the server is down.
-  const showOfflineNotice = () => {
+  function showOfflineNotice() {
     report = 'offline';
     clearTimeout(slowTimer);
     stopCountdown();
@@ -70,37 +71,40 @@ function watchLoad(base, frameUrl) {
     loading.style.animation = 'none';
     trouble.textContent = 'Bulwark\'s Offline mode keeps mail out of this overlay';
     openTab.hidden = false;
-  };
-  const fail = () => {
+  }
+  function fail() {
+    if (report === 'offline') return;
     report = 'failed';
     clearTimeout(slowTimer);
     frame.classList.remove('loaded');
-    startCountdown();
-  };
+    showFailure();
+  }
 
   // A frame fires load for error pages too, so watch its request. Bulwark's service worker can take the load over,
   // which shows up as the worker's own request for the same address, and browsers disagree on who started it.
   // Pages Bulwark opens itself and the hidden frame don't count.
+  const pathInApp = (url) => (url.startsWith(base) ? url.slice(base.length) : url).replace(LOCALE_SEGMENT, '');
   const isOverlayLoad = (details) => (details.type === 'sub_frame'
     ? (details.originUrl ?? details.initiator)?.startsWith(location.origin) && !details.url.startsWith(`${base}/api/version`)
-    : details.url === frameUrl);
+    : pathInApp(details.url) === pathInApp(frameUrl));
   const requestFilter = { urls: [`*://${new URL(base).hostname}/*`], types: ['sub_frame', 'xmlhttprequest'] };
   api.webRequest.onResponseStarted.addListener((details) => {
-    if (!isOverlayLoad(details) || report === 'offline') return;
+    if (!isOverlayLoad(details)) return;
     if (details.statusCode >= 400) {
       fail();
       return;
     }
-    if (report) return; // A late answer can't undo a failure, but the next try can.
-    if (details.type !== 'sub_frame' && workerAwake) {
-      showOfflineNotice();
-      return;
+    if (report === 'failed' || report === 'offline') return; // Only the next try clears these.
+    if (details.type === 'sub_frame') {
+      report = 'ok';
+      stopCountdown();
+    } else if (!report) {
+      if (workerAwake) showOfflineNotice();
+      else report = 'worker';
     }
-    report = details.type === 'sub_frame' ? 'ok' : 'worker';
-    stopCountdown();
   }, requestFilter);
   api.webRequest.onErrorOccurred.addListener((details) => {
-    if (isOverlayLoad(details) && report !== 'offline' && !CANCELLED_ERRORS.includes(details.error)) fail();
+    if (isOverlayLoad(details) && !CANCELLED_ERRORS.includes(details.error)) fail();
   }, requestFilter);
 
   // Hidden until loaded, so its blank white page never shows. The report can arrive just after load, so give it a moment.
@@ -108,17 +112,16 @@ function watchLoad(base, frameUrl) {
     if (!report) await new Promise((resolve) => setTimeout(resolve, REQUEST_REPORT_MS));
     if (report === 'failed' || report === 'offline') return;
     clearTimeout(slowTimer);
+    stopCountdown();
     if (report === 'worker') {
       // A worker that just started answers for the page, and framing rules can't touch that answer, so the browser
       // refuses to show it. Now it's awake, it leaves the next load alone, unless Offline mode is on.
-      workerAwake = true;
-      startLoad();
+      startLoad(true);
       return;
     }
     report = 'ok';
     openTab.hidden = true;
     trouble.textContent = '';
-    stopCountdown();
     frame.classList.add('loaded');
     hintWatcher('ok');
   });

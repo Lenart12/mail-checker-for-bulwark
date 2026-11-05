@@ -625,21 +625,25 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(notify(many, 'subject'), [{ url: 'inbox', title: '4 new messages', message: 'To: u\nHi' }]);
 
   // The overlay's message when Bulwark is slow or unreachable.
+  const popupHtml = fs.readFileSync(`${__dirname}/../src/popup.html`, 'utf8');
+  assert.match(popupHtml, /iframe \{[^}]*pointer-events: none/, 'a hidden frame mustn\'t cover the link');
+  assert.match(popupHtml, /iframe\.loaded \{[^}]*opacity: 1; pointer-events: auto/);
   const TROUBLE = 'Having trouble connecting to mail.test:8443';
-  const COUNTDOWN = 'Retrying in 15s';
+  const RETRY = 15;
+  const COUNTDOWN = `Retrying in ${RETRY}s`;
   const EXTENSION = 'moz-extension://x';
   const BASE = 'https://mail.test:8443/webmail';
   const SLOW_LOAD = 5000;
   const REPORT_WAIT = 200;
   const OVERLAY_URL = `${BASE}/mail`;
   const fromExtension = `${EXTENSION}/popup.html`;
-  const openPopup = async () => {
+  const openPopup = async (stored = {}) => {
     const elements = {};
     const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0, hints: [] };
     const popupContext = {
       browser: {
         runtime: { sendMessage: async ({ overlayLoad }) => { popup.hints.push(overlayLoad); } },
-        storage: { local: { get: async () => ({ base: BASE }), set: async () => {} } },
+        storage: { local: { get: async () => ({ base: BASE, ...stored }), set: async () => {} } },
         webRequest: {
           onResponseStarted: { addListener: (listener) => { popup.responded = listener; } },
           onErrorOccurred: { addListener: (listener) => { popup.errored = listener; } },
@@ -649,7 +653,16 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
         documentElement: { style: { setProperty() {} } },
         getElementById: (id) => (elements[id] ??= {
           style: {},
-          classList: { add() { popup.revealed = true; }, remove() { popup.revealed = false; } },
+          classList: {
+            add(name) {
+              assert.strictEqual(name, 'loaded');
+              popup.revealed = true;
+            },
+            remove(name) {
+              assert.strictEqual(name, 'loaded');
+              popup.revealed = false;
+            },
+          },
           addEventListener(type, listener) { this.onLoad = listener; },
           set src(value) { if (id === 'mail') popup.loads += 1; },
         }),
@@ -658,18 +671,15 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       matchMedia: () => ({ matches: false }),
       setTimeout: (work, ms) => {
         if (ms === REPORT_WAIT) return setTimeout(work, 0);
-        const timer = () => {
+        assert.strictEqual(ms, SLOW_LOAD);
+        assert.strictEqual(popup.timers[ms], undefined, 'no timer left over from the last try');
+        popup.timers[ms] = () => {
           delete popup.timers[ms];
           work();
         };
-        popup.timers[ms] = timer;
-        return timer;
+        return ms;
       },
-      clearTimeout: (timer) => {
-        for (const [ms, pending] of Object.entries(popup.timers)) {
-          if (pending === timer) delete popup.timers[ms];
-        }
-      },
+      clearTimeout: (ms) => { delete popup.timers[ms]; },
       setInterval: (work, ms) => {
         assert.strictEqual(ms, 1000, 'the countdown ticks once a second');
         assert.strictEqual(popup.tick, null, 'only one countdown at a time');
@@ -686,6 +696,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/popup.js`, 'utf8'), popupContext);
     await sleep(20);
     return popup;
+  };
+  const runCountdown = (popup) => {
+    for (let i = 0; i < RETRY; i++) popup.tick();
   };
   const shown = (popup) => [popup.elements.trouble.textContent ?? '', popup.elements.retry.textContent ?? ''];
   const ok = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 200, originUrl: fromExtension };
@@ -739,7 +752,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const workerOk = { type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: EXTENSION };
   popup = await openPopup();
   popup.responded(workerOk);
-  assert.strictEqual(popup.loads, 1, 'the browser ignores a repeat of a load in flight');
+  assert.strictEqual(popup.loads, 1, 'no reload until the load event');
   await popup.elements.mail.onLoad();
   assert.strictEqual(popup.loads, 2);
   assert.ok(!popup.revealed, 'the refused page stays hidden');
@@ -764,11 +777,13 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(popup.timers, {}, 'nothing left pending');
   popup.errored(refused);
   assert.deepStrictEqual(shown(popup), [OFFLINE, ''], 'stays once known');
+  popup.responded(badGateway);
+  assert.deepStrictEqual(shown(popup), [OFFLINE, ''], 'a failure doesn\'t restart the retries');
 
   // A worker can stop between tries, so answering again after a countdown doesn't mean Offline mode.
   popup = await openPopup();
   popup.responded({ ...workerOk, statusCode: 502 });
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   popup.responded(workerOk);
   await popup.elements.mail.onLoad();
   assert.strictEqual(popup.loads, 3);
@@ -780,23 +795,79 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup.responded(workerOk);
   await popup.elements.mail.onLoad();
   popup.errored({ ...refused, type: 'xmlhttprequest' });
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   popup.responded(workerOk);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'the count starts again after a countdown');
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying now'], 'the count starts again after a countdown');
   await popup.elements.mail.onLoad();
   popup.responded(ok);
   await popup.elements.mail.onLoad();
   assert.ok(popup.revealed);
 
-  // A tab can open the page while the overlay can't, which with Offline mode can show its saved copy.
+  // The link shows while the overlay can't load, and goes once the mail shows.
   popup = await openPopup();
   assert.strictEqual(popup.elements['open-tab'].href, OVERLAY_URL);
   popup.responded(badGateway);
   assert.strictEqual(popup.elements['open-tab'].hidden, false);
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   popup.responded(ok);
   await popup.elements.mail.onLoad();
   assert.strictEqual(popup.elements['open-tab'].hidden, true, 'gone once the mail shows');
+
+  // Bulwark can redirect to a language path, which browsers report differently when the worker takes the load.
+  const atLocale = `${BASE}/en/mail`;
+  const workerAt = (url, statusCode = 200) => ({ ...workerOk, url, statusCode });
+  popup = await openPopup();
+  popup.errored({ ...workerOk, error: 'net::ERR_ABORTED' });
+  popup.responded(workerAt(atLocale));
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 2, 'Chrome reports only the last address');
+  popup.errored({ ...workerOk, error: 'net::ERR_ABORTED' });
+  popup.responded(workerAt(atLocale));
+  assert.deepStrictEqual(shown(popup), [OFFLINE, '']);
+  popup = await openPopup();
+  popup.responded(workerAt(OVERLAY_URL, 307));
+  popup.responded(workerAt(atLocale));
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 2, 'Firefox reports the redirect as well');
+  popup.responded(workerAt(OVERLAY_URL, 307));
+  assert.deepStrictEqual(shown(popup), [OFFLINE, '']);
+  popup = await openPopup();
+  popup.responded(workerAt(OVERLAY_URL, 307));
+  popup.responded({ ...ok, url: atLocale });
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 1, 'a direct answer after the redirect needs no reload');
+  assert.ok(popup.revealed);
+  popup = await openPopup({ popupUrl: `${BASE}/mail/folder/inbox?slot=2` });
+  popup.responded(workerAt(`${BASE}/zh-TW/mail/folder/inbox?slot=2`, 502));
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], 'a link to one folder too');
+  popup = await openPopup({ popupUrl: `${BASE}/mail/folder/inbox?slot=2` });
+  popup.responded(workerAt(`${BASE}/en/mail/folder/sent?slot=2`, 502));
+  assert.deepStrictEqual(shown(popup), ['', ''], 'not another page');
+
+  // The notice replaces a countdown already running.
+  popup = await openPopup();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
+  popup.responded(workerOk);
+  assert.deepStrictEqual(shown(popup), [OFFLINE, '']);
+  assert.strictEqual(popup.tick, null);
+
+  // A worker's answer with no load event still gets a retry, and one in a countdown doesn't stop it.
+  popup = await openPopup();
+  popup.responded(workerOk);
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
+  runCountdown(popup);
+  assert.strictEqual(popup.loads, 2);
+  popup = await openPopup();
+  popup.timers[SLOW_LOAD]();
+  popup.responded(workerOk);
+  assert.notStrictEqual(popup.tick, null);
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.tick, null, 'its reload takes over from the countdown');
+  assert.strictEqual(popup.loads, 2);
 
   // Another tab's load can't reload a page already showing.
   popup = await openPopup();
@@ -814,7 +885,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup = await openPopup();
   popup.responded(badGateway);
   popup.responded(badGateway); // A second report mustn't start a second countdown.
-  for (let i = 0; i < 14; i++) popup.tick();
+  for (let i = 0; i < RETRY - 1; i++) popup.tick();
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 1s']);
   assert.strictEqual(popup.loads, 1, 'no retry before the countdown ends');
   popup.tick();
@@ -823,7 +894,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(popup.tick, null);
   popup.errored(refused);
   assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], 'a failed retry counts down again');
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   assert.strictEqual(popup.loads, 3);
   popup.responded(ok);
   await popup.elements.mail.onLoad();
@@ -835,7 +906,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup.responded(badGateway);
   popup.responded({ ...workerOk, originUrl: `${BASE}/sw.js?v=1` });
   assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   assert.strictEqual(popup.loads, 2);
   popup.responded(ok);
   await popup.elements.mail.onLoad();
@@ -849,10 +920,10 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(popup.hints, ['ok']);
   popup = await openPopup();
   popup.responded(badGateway);
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   popup.responded(badGateway);
   assert.deepStrictEqual(popup.hints, ['failed']);
-  for (let i = 0; i < 15; i++) popup.tick();
+  runCountdown(popup);
   popup.responded(ok);
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(popup.hints, ['failed', 'ok']);
