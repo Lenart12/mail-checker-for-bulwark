@@ -434,11 +434,12 @@
     report();
   }
 
-  // The extension's page that holds this frame. Nothing else may command it, or hear from it.
+  // The extension's page that holds this frame. Nothing else may command it.
   const EXTENSION_ORIGIN = api.runtime.getURL('').replace(/\/$/, '');
 
   function heartbeat() {
-    window.parent.postMessage('bridge-alive', EXTENSION_ORIGIN);
+    // Any target: Firefox drops a message aimed at the moz-extension origin, and the beat carries nothing.
+    window.parent.postMessage('bridge-alive', '*');
     syncAccounts();
   }
 

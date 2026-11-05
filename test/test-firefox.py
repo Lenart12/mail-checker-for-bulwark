@@ -147,6 +147,7 @@ def prepared_extension(folder):
 const report = (m) => fetch('{ORIGIN}/msg?m=' + encodeURIComponent(JSON.stringify(m)));
 browser.runtime.onMessage.addListener((m) => {{ if (m.status || m.mail) report(m); }});
 addEventListener('unhandledrejection', (e) => report({{ unhandled: String(e.reason) }}));
+addEventListener('message', (e) => {{ if (e.data === 'bridge-alive') report({{ beat: e.origin }}); }});
 browser.commands.getAll().then((commands) => report({{
   commands: commands.map((c) => c.name),
   openShortcutSettings: typeof browser.commands.openShortcutSettings,
@@ -161,6 +162,7 @@ setInterval(async () => {{
   const command = await (await fetch('{ORIGIN}/command')).text();
   if (command === 'pause') await pauseUntil('pause-indefinitely');
   if (command === 'resume') await endPause();
+  if (command === 'refresh') commandWatcher('refresh');
   if (command) report({{ done: command, title: await browser.browserAction.getTitle({{}}) }});
 }}, 500);
 const createNotification = browser.notifications.create;
@@ -246,6 +248,11 @@ def exercise_addon(browser, extension):
             pass  # The stream closed; the reconnect finds the mail instead.
     time.sleep(6)
     state['command'] = 'resume'
+    time.sleep(3)
+
+    print('--- Check for new mail reaches the hidden frame')
+    state['log_before_refresh'] = len(log)
+    state['command'] = 'refresh'
     time.sleep(2)
     return locks_during_token_request
 
@@ -262,7 +269,11 @@ def failures(locks_during_token_request):
     for message in messages:
         if 'menuError' in message:
             found.append(f'a menu entry failed: {message["menuError"]}')
-    done = [i for i, message in enumerate(messages) if 'done' in message]
+    if not any(message.get('beat') == ORIGIN for message in messages):
+        found.append('the hidden frame\'s heartbeat never reached the extension')
+    if 'JMAP Email/changes' not in log[state['log_before_refresh']:]:
+        found.append('Check for new mail never reached the hidden frame')
+    done = [i for i, message in enumerate(messages) if message.get('done') in ('pause', 'resume')]
     if len(done) != 2:
         found.append(f'pause and resume did not both run: {[messages[i] for i in done]}')
     elif json.loads(RULES).get('test@x', {}).get('notify') != 'never':
