@@ -33,6 +33,8 @@ function run({
   let markReadRequests = 0;
   const listeners = {};
   const sent = [];
+  const posted = [];
+  let now = 0;
   let pushChunk;
   let tokenRenewals = 0;
   let validAuth = tokenExpired ? 'Bearer new' : 'Bearer old';
@@ -81,7 +83,10 @@ function run({
         body: {
           getReader: () => ({
             read: () => new Promise((resolve) => { pushChunk = resolve; }),
-            cancel: async () => { cancelledStreams++; },
+            cancel: async () => {
+              cancelledStreams++;
+              pushChunk?.({ done: true });
+            },
           }),
         },
       };
@@ -128,7 +133,7 @@ function run({
     'settings-storage': JSON.stringify({ state: settings }),
   };
   const context = {
-    window: { parent: { postMessage() {} }, addEventListener: (type, fn) => { listeners[type] = fn; } },
+    window: { parent: { postMessage: (message) => posted.push(message) }, addEventListener: (type, fn) => { listeners[type] = fn; } },
     location: { href: frameUrl },
     localStorage: { getItem: (key) => store[key] ?? null },
     navigator: {
@@ -149,6 +154,7 @@ function run({
       },
     },
     fetch: fetchFake,
+    Date: { now: () => now },
     setTimeout: (fn, ms) => setTimeout(fn, ms * timeScale).unref(),
     setInterval() {},
     btoa,
@@ -170,6 +176,7 @@ function run({
   };
   const newMailWithoutPush = (state) => { serverState = state; };
   const refresh = () => listeners.message({ data: 'bridge-refresh' });
+  const check = () => listeners.message({ data: 'bridge-check' });
   const recheck = () => listeners.message({ data: 'bridge-recheck' });
   const markRead = () => listeners.message({ data: 'bridge-mark-read' });
   const logInAgainWith = (mode) => {
@@ -185,9 +192,12 @@ function run({
   return {
     calls,
     sent,
+    posted,
+    advance: (ms) => { now += ms; },
     push,
     newMailWithoutPush,
     refresh,
+    check,
     recheck,
     markRead,
     logInAgainWith,
@@ -308,32 +318,76 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok', 'the next success clears it');
 
-  // The overlay loading means the server is back, so a failed connection tries again without waiting.
+  // An overlay that loads makes a failed connection try again without waiting, but not too often.
+  const lastStatus = (t) => t.sent.filter((m) => m.status).at(-1).status;
   t = run({ authMode: 'basic', inboxMail: [], timeScale: 10 });
   t.failNext('Mailbox/get', 500);
   await sleep(20);
-  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'error');
+  assert.strictEqual(lastStatus(t), 'error');
   const callsBefore = t.calls.length;
   await sleep(50);
   assert.strictEqual(t.calls.length, callsBefore, 'waiting out the delay');
+  t.advance(5999);
   t.recheck();
   await sleep(20);
-  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
+  assert.strictEqual(t.calls.length, callsBefore, 'too soon after the last try');
+  t.advance(1);
+  t.recheck();
+  await sleep(20);
+  assert.strictEqual(lastStatus(t), 'ok');
   const callsWorking = t.calls.length;
+  t.advance(6000);
   t.recheck();
   await sleep(20);
   assert.strictEqual(t.calls.length, callsWorking, 'nothing to do once working');
 
   // A problem on a connection that's still open checks again the same way.
-  t = run({ authMode: 'basic', inboxMail: [] });
+  t = run({ authMode: 'basic', inboxMail: [], timeScale: 10 });
   await sleep(20);
   t.failNext('Email/changes', 500);
   t.refresh();
   await sleep(20);
-  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'error');
+  assert.strictEqual(lastStatus(t), 'error');
+  t.advance(6000);
   t.recheck();
   await sleep(20);
-  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
+  assert.strictEqual(lastStatus(t), 'ok');
+
+  // An overlay that fails makes working connections check at once, but not too often, and leaves failing ones alone.
+  t = run({ authMode: 'basic', inboxMail: [], timeScale: 10 });
+  await sleep(20);
+  const callsWhenIdle = t.calls.length;
+  t.advance(5999);
+  t.check();
+  await sleep(20);
+  assert.strictEqual(t.calls.length, callsWhenIdle, 'too soon after the last try');
+  t.advance(1);
+  t.failNext('Email/changes', 500);
+  t.check();
+  await sleep(20);
+  assert.strictEqual(lastStatus(t), 'error', 'a lost connection shows at once');
+  const callsWhenFailing = t.calls.length;
+  t.advance(6000);
+  t.check();
+  await sleep(20);
+  assert.strictEqual(t.calls.length, callsWhenFailing, 'already retrying');
+
+  // A failed check drops the open stream, so the normal reconnect clears the problem by itself.
+  t = run({ authMode: 'basic', inboxMail: [], timeScale: 0.001 });
+  await sleep(20);
+  t.failNext('Email/changes', 500);
+  t.refresh();
+  await sleep(50);
+  assert.strictEqual(lastStatus(t), 'ok');
+  assert.strictEqual(t.calls.filter((c) => c.url.endsWith('/.well-known/jmap')).length, 2);
+
+  // The host needs this beat, and must allow more time than the beats take.
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  assert.deepStrictEqual(t.posted, ['bridge-alive']);
+  const constantIn = (file, name) => Number(new RegExp(`${name} = ([\\d_]+)`).exec(fs.readFileSync(`${__dirname}/../src/${file}`, 'utf8'))[1].replaceAll('_', ''));
+  assert.ok(constantIn('host.js', 'BRIDGE_SILENCE_MS') > constantIn('bridge.js', 'HEARTBEAT_MS') * 2);
+  assert.ok(constantIn('host.js', 'FIRST_BEAT_MS') > constantIn('host.js', 'BRIDGE_CHECK_MS'));
 
   // Mail that arrives during a dropped connection alerts once after reconnecting.
   t = run({ authMode: 'basic', inboxMail: ['new1'], timeScale: 0.01 });
@@ -852,83 +906,100 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(shown(popup), ['', '']);
   assert.ok(popup.revealed);
 
-  // A new hidden frame gets less time for its first heartbeat than a running one gets between them.
-  let now = 0;
-  let watcherLoads = 0;
-  let watcherCheck;
-  let watcherMessage;
-  let hostMessage;
-  const watcherCommands = [];
-  const hostStatuses = [];
-  const hostContext = {
-    browser: { runtime: { onMessage: { addListener: (listener) => { hostMessage = listener; } } } },
-    Date: { now: () => now },
-    document: {
-      createElement: () => ({
-        contentWindow: { postMessage: (command) => watcherCommands.push(command) },
-        remove() {},
-        set src(value) { watcherLoads += 1; },
-      }),
-      body: { append() {} },
-    },
-    handleMessage: ({ status }) => hostStatuses.push(status),
-    location: { search: '' },
-    setInterval: (work) => { watcherCheck = work; },
-    URLSearchParams,
-    window: { addEventListener: (type, listener) => { watcherMessage = listener; } },
+  // The hidden frame's heartbeat: each scenario starts with a frame just loaded.
+  const FIRST_BEAT = 30_000;
+  const SILENCE = 150_000;
+  const openHost = () => {
+    let now = 0;
+    const host = { loads: 0, commands: [], statuses: [] };
+    const context = {
+      browser: { runtime: { onMessage: { addListener: (listener) => { host.message = listener; } } } },
+      Date: { now: () => now },
+      document: {
+        createElement: () => ({
+          contentWindow: { postMessage: (command) => host.commands.push(command) },
+          remove() {},
+          set src(value) { host.loads += 1; },
+        }),
+        body: { append() {} },
+      },
+      handleMessage: ({ status }) => host.statuses.push(status),
+      location: { search: '' },
+      setInterval: (work) => { host.check = work; },
+      URLSearchParams,
+      window: { addEventListener: (type, listener) => { host.windowMessage = listener; } },
+    };
+    context.globalThis = context;
+    vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/host.js`, 'utf8'), context);
+    host.load = (base = 'https://mail.test/webmail') => vm.runInNewContext(`loadWatcher("${base}")`, context);
+    host.after = (ms) => {
+      now += ms;
+      host.check();
+    };
+    host.load();
+    return host;
   };
-  hostContext.globalThis = hostContext;
-  vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/host.js`, 'utf8'), hostContext);
-  const loadHostWatcher = () => vm.runInNewContext('loadWatcher("https://mail.test/webmail")', hostContext);
-  loadHostWatcher();
-  loadHostWatcher();
-  assert.deepStrictEqual(hostStatuses, ['connecting'], 'a worker wake-up mustn\'t reset the badge');
-  assert.strictEqual(watcherLoads, 1);
-  now = 29_999;
-  watcherCheck();
-  assert.deepStrictEqual(hostStatuses, ['connecting']);
-  now = 30_000;
-  watcherCheck();
-  assert.deepStrictEqual(hostStatuses, ['connecting', 'error'], 'no first beat in time');
-  assert.strictEqual(watcherLoads, 2);
-  now = 179_999;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 2, 'later reloads wait longer');
-  now = 180_000;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 3);
-  watcherMessage({ data: 'something-else' });
-  now = 329_999;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 3);
-  watcherMessage({ data: 'bridge-alive' });
-  now = 479_998;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 3, 'a beat moves the deadline');
-  now = 479_999;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 4);
 
-  // The overlay's result is a reason to check, sooner than the frame or its connection would.
-  hostStatuses.length = 0;
-  hostMessage({ overlayLoad: 'failed' });
-  assert.deepStrictEqual(watcherCommands, ['bridge-refresh']);
-  assert.strictEqual(watcherLoads, 4, 'the frame stays as it is');
-  now = 480_000;
-  hostMessage({ overlayLoad: 'ok' });
-  assert.strictEqual(watcherLoads, 5, 'a stuck frame loads again at once');
-  assert.deepStrictEqual(hostStatuses, ['connecting']);
-  assert.deepStrictEqual(watcherCommands, ['bridge-refresh']);
-  now = 509_999;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 5);
-  now = 510_000;
-  watcherCheck();
-  assert.strictEqual(watcherLoads, 6, 'gets the shorter wait for a first beat');
-  watcherMessage({ data: 'bridge-alive' });
-  hostMessage({ overlayLoad: 'ok' });
-  assert.deepStrictEqual(watcherCommands, ['bridge-refresh', 'bridge-recheck'], 'a running bridge checks for itself');
-  assert.strictEqual(watcherLoads, 6);
+  let host = openHost();
+  host.load();
+  assert.deepStrictEqual(host.statuses, ['connecting'], 'a repeat for the same address mustn\'t reset the badge');
+  assert.strictEqual(host.loads, 1);
+  host.after(FIRST_BEAT - 1);
+  assert.deepStrictEqual(host.statuses, ['connecting']);
+  host.after(1);
+  assert.deepStrictEqual(host.statuses, ['connecting', 'error'], 'no first beat in time');
+  assert.strictEqual(host.loads, 2);
+  host.after(SILENCE - 1);
+  assert.strictEqual(host.loads, 2, 'later reloads wait longer');
+  host.after(1);
+  assert.strictEqual(host.loads, 3);
+
+  // A beat moves the deadline, and nothing else does.
+  host = openHost();
+  host.windowMessage({ data: 'something-else' });
+  host.windowMessage({ data: 'bridge-alive' });
+  host.after(SILENCE - 1);
+  assert.strictEqual(host.loads, 1);
+  host.windowMessage({ data: 'something-else' });
+  host.after(1);
+  assert.strictEqual(host.loads, 2);
+
+  // The overlay's result makes the watcher check at once.
+  host = openHost();
+  host.message({ overlayLoad: 'failed' });
+  assert.deepStrictEqual(host.commands, ['bridge-check']);
+  assert.strictEqual(host.loads, 1, 'the frame stays as it is');
+  host.message({ overlayLoad: 'ok' });
+  assert.deepStrictEqual(host.commands, ['bridge-check', 'bridge-recheck'], 'a frame not yet late checks for itself');
+  assert.strictEqual(host.loads, 1);
+
+  host = openHost();
+  host.after(FIRST_BEAT);
+  host.statuses.length = 0;
+  host.message({ overlayLoad: 'ok' });
+  assert.strictEqual(host.loads, 3, 'a silent frame loads again at once');
+  assert.deepStrictEqual(host.statuses, ['connecting']);
+  assert.deepStrictEqual(host.commands, []);
+  host.after(FIRST_BEAT - 1);
+  assert.strictEqual(host.loads, 3);
+  host.message({ overlayLoad: 'ok' });
+  assert.strictEqual(host.loads, 3, 'once for each missed beat');
+  assert.deepStrictEqual(host.commands, ['bridge-recheck']);
+  host.after(1);
+  assert.strictEqual(host.loads, 4, 'with the shorter wait for a first beat');
+  host.windowMessage({ data: 'bridge-alive' });
+  host.commands.length = 0;
+  host.message({ overlayLoad: 'ok' });
+  assert.deepStrictEqual(host.commands, ['bridge-recheck'], 'a running bridge checks for itself');
+  assert.strictEqual(host.loads, 4);
+
+  // A new address starts clean, even if the old frame had gone silent.
+  host = openHost();
+  host.after(FIRST_BEAT);
+  host.load('https://other.test/webmail');
+  const loadsNow = host.loads;
+  host.message({ overlayLoad: 'ok' });
+  assert.strictEqual(host.loads, loadsNow);
 
   // What each status shows on the badge.
   const statusCode = background.slice(background.indexOf('function describeProblem'), background.indexOf('async function iconUrl'));

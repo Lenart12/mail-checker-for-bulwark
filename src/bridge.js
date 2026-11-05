@@ -13,6 +13,7 @@
   const REQUEST_TIMEOUT_MS = 30_000;
   const RECONNECT_DELAY_MS = 3000;
   const MAX_RECONNECT_DELAY_MS = 60_000;
+  const MIN_RECHECK_GAP_MS = 6000; // Repeated refusals can get an address banned at the server.
   const HEARTBEAT_MS = 60_000;
   const DEFAULT_RULES = { notify: 'unmuted', badge: 'always' };
   const SOUND_FILES = {
@@ -221,7 +222,7 @@
   async function readEvents(watcher, stream, accountId, update) {
     const reader = stream.body.getReader();
     const decoder = new TextDecoder();
-    watcher.cancel = () => reader.cancel();
+    watcher.cancel = () => reader.cancel().catch(() => {});
     try {
       // Anything that arrived while disconnected.
       await update();
@@ -244,6 +245,7 @@
 
   async function connect(watcher) {
     const { account } = watcher;
+    watcher.lastAttempt = Date.now();
     // Read again on each connection, so Bulwark's session limits still apply.
     watcher.auth = null;
     const serverUrl = account.serverUrl.replace(/\/$/, '');
@@ -404,20 +406,31 @@
     syncAccounts();
   }
 
-  function runCommand(command) {
-    for (const watcher of watchers.values()) {
-      watcher.commands?.[command]().catch((error) => fail(watcher, error));
+  function runCommand(command, targets = watchers.values()) {
+    for (const watcher of targets) {
+      watcher.lastAttempt = Date.now();
+      watcher.commands?.[command]().catch((error) => {
+        fail(watcher, error);
+        watcher.cancel?.(); // Nothing else retries while the stream stays open.
+      });
     }
   }
 
-  // The overlay loaded, so the server is back: don't wait out the delay.
+  const notJustTried = () => [...watchers.values()].filter((w) => Date.now() - w.lastAttempt >= MIN_RECHECK_GAP_MS);
+
+  // The overlay failed, so working accounts may have lost their connection without noticing: check now.
+  function checkWorking() {
+    runCommand('refresh', notJustTried().filter((w) => !w.problem));
+  }
+
+  // The overlay loaded, so Bulwark is up and failing accounts may recover: check now.
   function recheckFailing() {
-    for (const watcher of watchers.values()) {
-      if (!watcher.problem) continue;
+    const due = notJustTried().filter((w) => w.problem);
+    for (const watcher of due) {
       watcher.delay = RECONNECT_DELAY_MS;
-      if (watcher.wake) watcher.wake();
-      else watcher.commands?.refresh().catch((error) => fail(watcher, error));
+      watcher.wake?.();
     }
+    runCommand('refresh', due.filter((w) => !w.wake));
   }
 
   // Scripts match every port of the host, because match patterns can't name one. Only the saved address counts.
@@ -428,9 +441,10 @@
       if (event.key === 'account-registry') syncAccounts();
     });
     window.addEventListener('message', (event) => {
-      if (event.data === 'bridge-recheck') recheckFailing();
-      const command = /^bridge-(refresh|mark-read)$/.exec(event.data)?.[1];
-      if (command) runCommand(command);
+      const command = /^bridge-(refresh|mark-read|check|recheck)$/.exec(event.data)?.[1];
+      if (command === 'check') checkWorking();
+      else if (command === 'recheck') recheckFailing();
+      else if (command) runCommand(command);
     });
     api.storage.onChanged.addListener((changes) => {
       if (!changes.accountRules) return;
