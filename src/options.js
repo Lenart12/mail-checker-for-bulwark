@@ -79,7 +79,8 @@ async function connect(address) {
   showConnected(base);
   const url = new URL(base);
   const unencrypted = url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  statusLine.textContent = `Connected. Pin the extension to your toolbar, and make sure you're logged in to Bulwark in this browser.${
+  const done = base === previous ? 'Saved.' : 'Connected. Pin the extension to your toolbar, and make sure you\'re logged in to Bulwark in this browser.';
+  statusLine.textContent = `${done}${
     unencrypted ? ' This address isn\'t encrypted, so your password and mail can be read on the network.' : ''}`;
 }
 
@@ -191,7 +192,16 @@ function showAccounts(accounts = []) {
   if (!accounts.length) {
     const empty = document.createElement('p');
     empty.className = 'note';
-    empty.textContent = 'Log in to Bulwark in this browser, and your accounts will appear here.';
+    const logIn = document.createElement('a');
+    logIn.href = '#';
+    logIn.textContent = 'Log in to Bulwark';
+    // Read at the click, since the address can change after this shows.
+    logIn.addEventListener('click', async (event) => {
+      event.preventDefault();
+      const { base } = await api.storage.local.get('base');
+      api.tabs.create({ url: `${base}/mail` });
+    });
+    empty.append(logIn, ' in this browser, and your accounts will appear here.');
     list.replaceChildren(empty);
     return;
   }
@@ -212,6 +222,12 @@ api.storage.local.get(['base', 'icon', 'options', 'accounts', 'accountRules']).t
   showAccounts(accounts);
   if (icon) showIcon(icon);
   if (base) showConnected(base);
+  // Site access can be taken away in the browser's extension settings, which leaves the badge on ! for good.
+  if (base) {
+    api.permissions.contains({ origins: [originPattern(base)] }).then((allowed) => {
+      if (!allowed) statusLine.textContent = `The extension can no longer reach ${new URL(base).host}. Click Save to allow it again.`;
+    });
+  }
   for (const [id, value] of Object.entries(options ?? {})) writeOption(id, value);
   showVolume();
   showTestButton();

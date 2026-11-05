@@ -649,7 +649,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(own.isActiveAccount, true);
 
   // Connecting follows a redirect to the real address, however the path is written.
-  const page = { elements: {}, sent: [], tabs: [], openedShortcuts: 0 };
+  const page = { elements: {}, sent: [], tabs: [], openedShortcuts: 0, allowed: false };
   const optionsContext = {
     URL,
     Set,
@@ -661,15 +661,20 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       getElementById: (id) => (page.elements[id] ??= {
         listeners: {},
         addEventListener(type, fn) { this.listeners[type] = fn; },
-        replaceChildren() {},
+        replaceChildren(...children) { this.children = children; },
       }),
-      createElement: () => ({}),
+      createElement: () => ({
+        listeners: {},
+        addEventListener(type, fn) { this.listeners[type] = fn; },
+        append(...children) { this.children = children; },
+      }),
     },
     chrome: {
       storage: { local: { get: async () => ({ base: 'https://mail.test/webmail' }), set: async () => {} }, onChanged: { addListener() {} } },
       commands: { getAll: async () => [{ name: '_execute_action', shortcut: 'Ctrl+Shift+M' }] },
       runtime: { sendMessage(message) { page.sent.push(message); } },
       tabs: { create({ url }) { page.tabs.push(url); } },
+      permissions: { contains: async () => page.allowed },
     },
     fetch: async (url) => ({
       url: url === 'https://mail.test/' ? 'https://mail.test/webmail/en' : url,
@@ -691,6 +696,13 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(await find('https://mail.test/mail'), 'https://mail.test/mail', 'sub-path that looks like a page');
   optionsContext.fetch = async (url) => ({ url, ok: false, json: async () => ({}) });
   assert.strictEqual(await find('https://not-bulwark.test/'), null);
+
+  // Site access taken away in the browser says how to get it back. With no accounts, the page links to the login.
+  assert.strictEqual(page.elements.status.textContent, 'The extension can no longer reach mail.test. Click Save to allow it again.');
+  const [logInLink] = page.elements.accounts.children[0].children;
+  await logInLink.listeners.click({ preventDefault() {} });
+  assert.strictEqual(page.tabs.at(-1), 'https://mail.test/webmail/mail');
+  page.tabs.length = 0;
 
   // The test button sends a made-up email through the real alert, linking to the mail. The shortcut line shows the key.
   await page.elements.testNotification.listeners.click();
@@ -901,7 +913,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
             },
           },
           addEventListener(type, listener) { this.onLoad = listener; },
-          set src(value) { if (id === 'mail') popup.loads += 1; },
+          focus() { popup.focused = true; },
+          set src(value) {
+            if (id !== 'mail') return;
+            popup.loads += 1;
+            popup.src = value;
+          },
         }),
       },
       location: { origin: EXTENSION },
@@ -952,6 +969,13 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(shown(popup), ['', '']);
   assert.deepStrictEqual(popup.timers, {}, 'the load clears the timer');
   assert.ok(popup.revealed);
+  assert.ok(popup.focused, 'keys go to Bulwark at once');
+
+  // A saved link opens only if it's on the saved address.
+  popup = await openPopup({ popupUrl: 'https://evil.test/mail' });
+  assert.strictEqual(popup.src, OVERLAY_URL);
+  popup = await openPopup({ popupUrl: `${BASE}/mail/folder/inbox?slot=3` });
+  assert.strictEqual(popup.src, `${BASE}/mail/folder/inbox?slot=3`);
 
   // No request events at all must still show the mail.
   popup = await openPopup();

@@ -123,6 +123,8 @@ function watchLoad(base, frameUrl) {
     openTab.hidden = true;
     trouble.textContent = '';
     frame.classList.add('loaded');
+    // So Bulwark's keyboard shortcuts work without a click, after opening the overlay with a key.
+    frame.focus();
     hintWatcher('ok');
   });
   startLoad();
