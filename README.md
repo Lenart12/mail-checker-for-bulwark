@@ -61,6 +61,7 @@ The extension sends its own notifications, separately from Bulwark. If you've al
 
 - It relies on internal Bulwark details, so a Bulwark update can break it. Tested with Bulwark 1.20.0.
 - Bulwark plugins that use their own frames won't load in the overlay.
+- With Bulwark's Offline mode on, mail can't show in the overlay, because the browser won't frame the pages it saves. The overlay offers **Open in a tab** instead.
 - There are no alerts for mail that arrived while the browser was closed, though the unread count includes it.
 
 ## Development

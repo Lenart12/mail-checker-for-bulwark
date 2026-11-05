@@ -648,6 +648,56 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await popup.elements.mail.onLoad();
   assert.ok(popup.revealed);
 
+  // Offline mode has the worker answer every load, so the page can never show here, whatever the server does.
+  const OFFLINE = 'Bulwark\'s Offline mode keeps mail out of this overlay';
+  popup = await openPopup();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), [OFFLINE, '']);
+  assert.strictEqual(popup.elements['open-tab'].href, OVERLAY_URL);
+  assert.strictEqual(popup.elements['open-tab'].hidden, false);
+  assert.ok(!popup.revealed);
+  assert.strictEqual(popup.loads, 2, 'no more tries');
+  assert.strictEqual(popup.tick, null);
+  assert.deepStrictEqual(popup.timers, {}, 'nothing left pending');
+  popup.errored(refused);
+  assert.deepStrictEqual(shown(popup), [OFFLINE, ''], 'stays once known');
+
+  // A worker can stop between tries, so answering again after a countdown doesn't mean Offline mode.
+  popup = await openPopup();
+  popup.responded({ ...workerOk, statusCode: 502 });
+  for (let i = 0; i < 15; i++) popup.tick();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 3);
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  assert.ok(popup.revealed);
+  popup = await openPopup();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  popup.errored({ ...refused, type: 'xmlhttprequest' });
+  for (let i = 0; i < 15; i++) popup.tick();
+  popup.responded(workerOk);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'the count starts again after a countdown');
+  await popup.elements.mail.onLoad();
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.ok(popup.revealed);
+
+  // A tab can open the page while the overlay can't, which with Offline mode can show its saved copy.
+  popup = await openPopup();
+  assert.strictEqual(popup.elements['open-tab'].href, OVERLAY_URL);
+  popup.responded(badGateway);
+  assert.strictEqual(popup.elements['open-tab'].hidden, false);
+  for (let i = 0; i < 15; i++) popup.tick();
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.elements['open-tab'].hidden, true, 'gone once the mail shows');
+
   // Another tab's load can't reload a page already showing.
   popup = await openPopup();
   popup.responded(ok);
