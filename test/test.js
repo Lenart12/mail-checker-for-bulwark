@@ -551,7 +551,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       browser: {
         storage: { local: { get: async () => ({ base: 'https://mail.test:8443/webmail' }), set: async () => {} } },
         webRequest: {
-          onCompleted: { addListener: (listener) => { popup.completed = listener; } },
+          onResponseStarted: { addListener: (listener) => { popup.responded = listener; } },
           onErrorOccurred: { addListener: (listener) => { popup.errored = listener; } },
         },
       },
@@ -592,7 +592,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
 
   // A slow page after the server answered gets the message alone, and clears once loaded.
   let popup = await openPopup();
-  popup.completed(ok);
+  popup.responded(ok);
   assert.deepStrictEqual(shown(popup), ['', ''], 'nothing shown while loading normally');
   popup.timers[SLOW_LOAD]();
   assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'answered, so no countdown');
@@ -608,24 +608,24 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
 
   // A frame fires load for a 502 too: say so at once and keep the error page hidden, in either order.
   popup = await openPopup();
-  popup.completed(badGateway);
+  popup.responded(badGateway);
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
   await popup.elements.mail.onLoad();
   assert.ok(!popup.revealed, 'the error page stays hidden');
   popup = await openPopup();
   const loading = popup.elements.mail.onLoad();
-  popup.completed(badGateway);
+  popup.responded(badGateway);
   await loading;
   assert.ok(!popup.revealed, 'a report just after load never shows it');
   popup = await openPopup();
   await popup.elements.mail.onLoad();
-  popup.completed(badGateway);
+  popup.responded(badGateway);
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
   assert.ok(!popup.revealed, 'a much later report hides it again');
 
   // Bulwark's service worker can report the load as its own request, as Chrome does when the worker has just started.
   const workerStarted = [{ initiator: 'moz-extension://x' }, { originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' }];
-  for (const report of ['completed', 'errored']) {
+  for (const report of ['responded', 'errored']) {
     for (const started of workerStarted) {
       popup = await openPopup();
       popup[report]({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 502, error: 'net::ERR_FAILED', ...started });
@@ -635,14 +635,14 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     }
   }
   popup = await openPopup();
-  popup.completed({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' });
+  popup.responded({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' });
   popup.timers[SLOW_LOAD]();
   assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'counts as an answer');
 
   // The countdown ends in another try, which can fail again or show the mail.
   popup = await openPopup();
-  popup.completed(badGateway);
-  popup.completed(badGateway);
+  popup.responded(badGateway);
+  popup.responded(badGateway);
   for (let i = 0; i < 14; i++) popup.tick();
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 1s']);
   assert.strictEqual(popup.loads, 1, 'no retry before the countdown ends');
@@ -654,16 +654,33 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s'], 'a failed retry counts down again');
   for (let i = 0; i < 15; i++) popup.tick();
   assert.strictEqual(popup.loads, 3);
-  popup.completed(ok);
+  popup.responded(ok);
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);
   assert.ok(popup.revealed, 'a retry that works shows the mail');
+
+  // An answer for that address, such as another tab's, can't stop the retries after a failure.
+  popup = await openPopup();
+  popup.responded(badGateway);
+  popup.responded({ ...ok, type: 'xmlhttprequest', originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' });
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  for (let i = 0; i < 15; i++) popup.tick();
+  assert.strictEqual(popup.loads, 2);
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.ok(popup.revealed);
+
+  // A connection lost partway through the page counts as failed, after an answer too.
+  popup = await openPopup();
+  popup.responded(ok);
+  popup.errored(refused);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
 
   // No answer shows the message and countdown together, and a late answer still counts.
   popup = await openPopup();
   popup.timers[SLOW_LOAD]();
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
-  popup.completed(ok);
+  popup.responded(ok);
   assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'no retry to cut it off');
   assert.strictEqual(popup.tick, null);
   await popup.elements.mail.onLoad();
@@ -685,9 +702,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
 
   // Failures in the hidden frame, the extension's other requests, or pages Bulwark opens itself, aren't the overlay's.
   popup = await openPopup();
-  popup.completed({ ...badGateway, url: 'https://mail.test:8443/webmail/api/version', initiator: 'moz-extension://x' });
-  popup.completed({ ...badGateway, type: 'xmlhttprequest', url: 'https://mail.test:8443/webmail/manifest.webmanifest', initiator: 'moz-extension://x' });
-  popup.completed({ ...badGateway, url: 'https://mail.test:8443/webmail/plugin-sandbox', initiator: 'https://mail.test:8443' });
+  popup.responded({ ...badGateway, url: 'https://mail.test:8443/webmail/api/version', initiator: 'moz-extension://x' });
+  popup.responded({ ...badGateway, type: 'xmlhttprequest', url: 'https://mail.test:8443/webmail/manifest.webmanifest', initiator: 'moz-extension://x' });
+  popup.responded({ ...badGateway, url: 'https://mail.test:8443/webmail/plugin-sandbox', initiator: 'https://mail.test:8443' });
   popup.errored({ ...refused, initiator: undefined });
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);

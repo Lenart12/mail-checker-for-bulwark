@@ -21,12 +21,9 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
   const retry = document.getElementById('retry');
   const frame = document.getElementById('mail');
   const frameUrl = popupUrl ?? `${base}/mail`;
-  let failed = false;
-  let answered = false;
+  let report = null; // What this load's request said: 'ok' or 'failed'.
   let slowTimer;
   let countdown = null;
-  let requestReported;
-  let requestReport;
 
   const showTrouble = () => {
     trouble.textContent = `Having trouble connecting to ${new URL(base).host}`;
@@ -53,19 +50,14 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
     }, 1000);
   };
   function startLoad() {
-    failed = false;
-    answered = false;
-    requestReport = new Promise((resolve) => {
-      requestReported = resolve;
-    });
+    report = null;
     // Once the server has answered, a slow page only gets the message: another try would cut it off.
-    slowTimer = setTimeout(() => (answered ? showTrouble() : startCountdown()), SLOW_LOAD_MS);
+    slowTimer = setTimeout(() => (report === 'ok' ? showTrouble() : startCountdown()), SLOW_LOAD_MS);
     frame.src = frameUrl;
   }
   const fail = () => {
-    failed = true;
+    report = 'failed';
     clearTimeout(slowTimer);
-    requestReported();
     frame.classList.remove('loaded');
     startCountdown();
   };
@@ -77,15 +69,15 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
     ? (details.originUrl ?? details.initiator)?.startsWith(location.origin) && !details.url.startsWith(`${base}/api/version`)
     : details.url === frameUrl);
   const requests = { urls: [`*://${new URL(base).hostname}/*`], types: ['sub_frame', 'xmlhttprequest'] };
-  api.webRequest.onCompleted.addListener((details) => {
+  api.webRequest.onResponseStarted.addListener((details) => {
     if (!isOverlayLoad(details)) return;
     if (details.statusCode >= 400) {
       fail();
       return;
     }
-    answered = true;
+    if (report === 'failed') return; // A late answer can't undo this, but the next try can.
+    report = 'ok';
     stopCountdown();
-    requestReported();
   }, requests);
   api.webRequest.onErrorOccurred.addListener((details) => {
     if (isOverlayLoad(details) && !CANCELLED_ERRORS.includes(details.error)) fail();
@@ -93,8 +85,8 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
 
   // Hidden until loaded, so its blank white page never shows. The report can arrive just after load, so give it a moment.
   frame.addEventListener('load', async () => {
-    await Promise.race([requestReport, new Promise((resolve) => setTimeout(resolve, REQUEST_REPORT_MS))]);
-    if (failed) return;
+    if (!report) await new Promise((resolve) => setTimeout(resolve, REQUEST_REPORT_MS));
+    if (report === 'failed') return;
     clearTimeout(slowTimer);
     stopCountdown();
     trouble.textContent = '';
