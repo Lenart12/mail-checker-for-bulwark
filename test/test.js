@@ -634,10 +634,31 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       assert.ok(!popup.revealed, 'the error page stays hidden');
     }
   }
+
+  // The browser refuses to show a page the worker answered for, so the overlay loads it again once it's awake.
+  const workerOk = { type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' };
   popup = await openPopup();
-  popup.responded({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' });
-  popup.timers[SLOW_LOAD]();
-  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'counts as an answer');
+  popup.responded(workerOk);
+  assert.strictEqual(popup.loads, 1, 'the browser ignores a repeat of a load in flight');
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 2);
+  assert.ok(!popup.revealed, 'the refused page stays hidden');
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.ok(popup.revealed);
+
+  // Another tab's load can't reload a page already showing.
+  popup = await openPopup();
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.loads, 1);
+  popup = await openPopup();
+  await popup.elements.mail.onLoad();
+  popup.responded(workerOk);
+  assert.strictEqual(popup.loads, 1, 'nor when no report came for it');
 
   // The countdown ends in another try, which can fail again or show the mail.
   popup = await openPopup();
@@ -662,7 +683,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // An answer for that address, such as another tab's, can't stop the retries after a failure.
   popup = await openPopup();
   popup.responded(badGateway);
-  popup.responded({ ...ok, type: 'xmlhttprequest', originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' });
+  popup.responded({ ...workerOk, originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' });
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
   for (let i = 0; i < 15; i++) popup.tick();
   assert.strictEqual(popup.loads, 2);

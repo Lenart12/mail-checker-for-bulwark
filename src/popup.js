@@ -21,7 +21,8 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
   const retry = document.getElementById('retry');
   const frame = document.getElementById('mail');
   const frameUrl = popupUrl ?? `${base}/mail`;
-  let report = null; // What this load's request said: 'ok' or 'failed'.
+  let report = null; // What this load's request said: 'ok', 'failed' or 'worker'.
+  let reloadedForWorker = false;
   let slowTimer;
   let countdown = null;
 
@@ -52,7 +53,7 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
   function startLoad() {
     report = null;
     // Once the server has answered, a slow page only gets the message: another try would cut it off.
-    slowTimer = setTimeout(() => (report === 'ok' ? showTrouble() : startCountdown()), SLOW_LOAD_MS);
+    slowTimer = setTimeout(() => (report ? showTrouble() : startCountdown()), SLOW_LOAD_MS);
     frame.src = frameUrl;
   }
   const fail = () => {
@@ -75,8 +76,8 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
       fail();
       return;
     }
-    if (report === 'failed') return; // A late answer can't undo this, but the next try can.
-    report = 'ok';
+    if (report) return; // A late answer can't undo a failure, but the next try can.
+    report = details.type !== 'sub_frame' && !reloadedForWorker ? 'worker' : 'ok';
     stopCountdown();
   }, requests);
   api.webRequest.onErrorOccurred.addListener((details) => {
@@ -88,6 +89,14 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
     if (!report) await new Promise((resolve) => setTimeout(resolve, REQUEST_REPORT_MS));
     if (report === 'failed') return;
     clearTimeout(slowTimer);
+    if (report === 'worker') {
+      // A worker that just started answers for the page, and framing rules can't touch that answer, so the browser
+      // refuses to show it. Now it's awake, it leaves the next load alone.
+      reloadedForWorker = true;
+      startLoad();
+      return;
+    }
+    report = 'ok';
     stopCountdown();
     trouble.textContent = '';
     frame.classList.add('loaded');
