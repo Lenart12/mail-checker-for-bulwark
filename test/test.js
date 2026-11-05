@@ -190,6 +190,12 @@ function run({
     });
   };
   const newMailWithoutPush = (state) => { serverState = state; };
+  // Several state events in one chunk, as a bulk change sends them.
+  const pushBurst = (count, state) => {
+    serverState = state;
+    const event = `event: state\ndata: ${JSON.stringify({ changed: { acc1: { Email: state } } })}\n\n`;
+    pushChunk({ done: false, value: new TextEncoder().encode(event.repeat(count)) });
+  };
   const refresh = () => listeners.message({ data: 'bridge-refresh', origin: 'moz-extension://ext' });
   const check = () => listeners.message({ data: 'bridge-check', origin: 'moz-extension://ext' });
   const recheck = () => listeners.message({ data: 'bridge-recheck', origin: 'moz-extension://ext' });
@@ -211,6 +217,7 @@ function run({
     advance: (ms) => { now += ms; },
     push,
     newMailWithoutPush,
+    pushBurst,
     refresh,
     check,
     recheck,
@@ -411,6 +418,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(lastStatus(t), 'ok');
   assert.strictEqual(t.calls.filter((c) => c.url.endsWith('/.well-known/jmap')).length, 2);
 
+  // Firefox runs host.js and background.js in one scope, where a repeated function name silently replaces the other.
+  const topLevelNames = (file) => [...fs.readFileSync(`${__dirname}/../src/${file}`, 'utf8')
+    .matchAll(/^(?:async )?(?:function|const|let|class) (\w+)/gm)].map((m) => m[1]);
+  const hostNames = new Set(topLevelNames('host.js'));
+  assert.deepStrictEqual(topLevelNames('background.js').filter((name) => hostNames.has(name)), []);
+
   // The host needs this beat, and must allow more time than the beats take.
   t = run({ authMode: 'basic', inboxMail: [] });
   await sleep(20);
@@ -442,6 +455,27 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.deepStrictEqual(mailMessages(t.sent), []);
   assert.ok(!('2:u:basic' in t.savedStates()));
+
+  // Check for new mail on an account waiting to reconnect connects now, rather than using its old connection.
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  t.failNext('Email/changes', 500);
+  t.refresh();
+  await sleep(20);
+  const sessions = () => t.calls.filter((c) => c.url.endsWith('/.well-known/jmap')).length;
+  const sessionsBefore = sessions();
+  t.refresh();
+  await sleep(20);
+  assert.strictEqual(sessions(), sessionsBefore + 1);
+  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
+
+  // Many events in one chunk check once.
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  const postsBefore = t.calls.filter((c) => c.method === 'POST').length;
+  t.pushBurst(3, 's2');
+  await sleep(20);
+  assert.strictEqual(t.calls.filter((c) => c.method === 'POST').length - postsBefore, 2, 'Email/changes and Mailbox/get, once');
 
   // Changing a rule doesn't ask again for an account that's failing.
   t = run({ authMode: 'basic', inboxMail: [] });
@@ -800,7 +834,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     CUE_GAP_MS: 3000,
     Date: { now: () => cues.now },
     api: {
-      storage: { local: { set: async () => {} } },
+      storage: { local: { get: async () => ({ base: 'b' }), set: async () => {} } },
       notifications: {
         create() { cues.notifications++; },
         getAll: async () => ({ 'm1?slot=2&owner=a': true, 'inbox?slot=2&owner=a': true, 'm2?slot=3&owner=a': true }),
@@ -811,7 +845,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     iconUrl: async () => 'icon',
     wiggle() { cues.wiggles++; },
     tabPlaysSound: async () => cues.tabPlays,
-    playSound() { cues.sounds++; },
+    playSound(url) { cues.sounds++; cues.soundUrl = url; },
     activePause: async () => null,
     updatePausedMail: async () => {},
   });
@@ -827,6 +861,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   cues.now += 3000;
   await alertOne();
   assert.deepStrictEqual([cues.notifications, cues.sounds, cues.wiggles], [4, 2, 2], 'later mail cues again');
+  cues.now += 3000;
+  await backgroundContext.alertMail({ mail: [one], base: 'https://evil.test', sound: 's.mp3', inboxUrl: 'inbox' });
+  assert.strictEqual(cues.soundUrl, 'b/notification/s.mp3', 'the sound comes from the saved address');
 
   // An account with nothing unread loses only its own notifications; a loaded overlay clears them all.
   await backgroundContext.clearNotifications('?slot=2&owner=a');
@@ -834,6 +871,28 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   cues.cleared = [];
   await backgroundContext.clearNotifications();
   assert.strictEqual(cues.cleared.length, 3);
+
+  // The resting icon is drawn again only when something it shows changes, not at each worker restart.
+  const resting = { local: { idle: false, iconCheckedAt: 1 }, session: {}, draws: 0 };
+  const restingContext = {
+    api: {
+      storage: {
+        local: { get: async () => ({ ...resting.local }) },
+        session: { get: async () => ({ ...resting.session }), set: async (items) => Object.assign(resting.session, items) },
+      },
+    },
+    iconCanvas: async () => ({}),
+    drawIcon: async () => { resting.draws++; },
+  };
+  vm.runInNewContext(background.slice(background.indexOf('// Chromium\'s worker restarts about every minute, and each start would draw'), background.indexOf('// The web app manifest points')), restingContext);
+  await restingContext.showRestingIcon();
+  await restingContext.showRestingIcon();
+  assert.strictEqual(resting.draws, 1);
+  resting.local.idle = true;
+  await restingContext.showRestingIcon();
+  resting.local.iconCheckedAt = 2;
+  await restingContext.showRestingIcon();
+  assert.strictEqual(resting.draws, 3, 'greying and a new icon draw again');
 
   // Only links on the saved address open, whether from a notification or from storage.
   const opened = [];

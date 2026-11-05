@@ -292,9 +292,14 @@ function drawIcon({ image, ctx }, angle, idle, paused = false) {
 }
 
 // Grey until connected with unread mail, and while paused. A pause can't wiggle, so only this shows its mark.
+// Chromium's worker restarts about every minute, and each start would draw the same icon again. The browser keeps
+// the drawn icon until it closes, and session storage goes with it.
 async function showRestingIcon() {
-  const { idle = true, pause } = await api.storage.local.get(['idle', 'pause']);
+  const { idle = true, pause, iconCheckedAt } = await api.storage.local.get(['idle', 'pause', 'iconCheckedAt']);
+  const drawn = `${idle} ${Boolean(pause)} ${iconCheckedAt}`;
+  if ((await api.storage.session.get('drawn')).drawn === drawn) return;
   await drawIcon(await iconCanvas(), 0, idle, Boolean(pause));
+  await api.storage.session.set({ drawn });
 }
 
 // The web app manifest points at the instance's branded icon, always as a PNG.
@@ -338,6 +343,7 @@ async function wiggle() {
   wiggling = true;
   const frames = 24;
   try {
+    await api.storage.session.remove('drawn'); // The frames replace the resting icon.
     const canvas = await iconCanvas();
     for (let i = 0; i <= frames; i++) {
       const progress = i / frames;
@@ -415,8 +421,10 @@ async function tabPlaysSound(base, tabMayAlert) {
 let lastWiggle = 0;
 let lastSound = 0;
 // A test from the settings page alerts like real mail, but isn't held by a pause and doesn't choose an account.
-async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inboxUrl, reducedMotion, test }) {
+async function alertMail({ mail, sound, isActiveAccount, tabMayAlert, inboxUrl, reducedMotion, test }) {
   const options = await getOptions();
+  // The saved address, not the message's, so the sound can only come from the Bulwark server.
+  const { base } = await api.storage.local.get('base');
   if (!test) {
     // The next overlay or tab opens the account this mail is for.
     await api.storage.local.set({ popupUrl: isActiveAccount ? null : inboxUrl });

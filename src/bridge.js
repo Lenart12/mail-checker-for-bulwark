@@ -254,10 +254,11 @@
         buffer += decoder.decode(chunk.value, { stream: true });
         const events = buffer.split('\n\n');
         buffer = events.pop();
-        for (const event of events) {
+        // Once for the lot: bulk changes, such as marking many read, arrive as many events.
+        if (events.some((event) => {
           const changed = changedTypes(event, accountId);
-          if (changed?.Email || changed?.Mailbox) await update();
-        }
+          return changed?.Email || changed?.Mailbox;
+        })) await update();
       }
     } finally {
       reader.cancel().catch(() => {});
@@ -446,6 +447,12 @@
   function runCommand(command, targets = watchers.values()) {
     for (const watcher of targets) {
       watcher.lastAttempt = Date.now();
+      // Waiting to reconnect: its old connection has no stream, so a check on it could show ok with no push.
+      if (command === 'refresh' && watcher.wake) {
+        watcher.delay = RECONNECT_DELAY_MS;
+        watcher.wake();
+        continue;
+      }
       watcher.commands?.[command]().catch((error) => {
         fail(watcher, error);
         watcher.cancel?.(); // Nothing else retries while the stream stays open.
@@ -462,12 +469,7 @@
 
   // The overlay loaded, so Bulwark is up and failing accounts may recover: check now.
   function recheckFailing() {
-    const due = notJustTried().filter((w) => w.problem);
-    for (const watcher of due) {
-      watcher.delay = RECONNECT_DELAY_MS;
-      watcher.wake?.();
-    }
-    runCommand('refresh', due.filter((w) => !w.wake));
+    runCommand('refresh', notJustTried().filter((w) => w.problem));
   }
 
   // Scripts match every port of the host, because match patterns can't name one. Only the saved address counts.
