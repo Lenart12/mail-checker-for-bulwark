@@ -849,7 +849,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     URL,
     api: {
       storage: { local: { get: async () => ({ base: 'https://mail.test/webmail' }) } },
-      permissions: { onAdded: { addListener() {} } },
+      permissions: { onAdded: { addListener() {} }, onRemoved: { addListener() {} } },
     },
     loadWatcher: (base, again) => regained.loads.push(`${base} ${again}`),
     start: () => { regained.starts++; },
@@ -1404,6 +1404,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual((await badgeFor({ status: 'connecting', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)\nConnecting…', 'says the others are connecting');
   Object.assign(access, { base: 'https://mail.test/webmail', removed: true });
   assert.strictEqual((await badgeFor({ status: 'error' })).title, 'The extension can no longer reach mail.test. Open Settings to allow it again.', 'names a missing site access');
+  assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 2 }), { color: 'red', text: '!', title: 'The extension can no longer reach mail.test. Open Settings to allow it again.' }, 'an open frame\'s count doesn\'t hide it');
   Object.assign(access, { base: undefined, removed: false });
 
   // Pausing: silent for every account, a count per account, and firstInbox summary at the end.

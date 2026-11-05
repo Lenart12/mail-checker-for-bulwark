@@ -209,7 +209,10 @@ async function showPause() {
 
 async function showStatus(message) {
   lastStatus = message;
-  const { status, unread, counts = [], problems = [] } = message;
+  const { base } = await api.storage.local.get('base');
+  // An open hidden frame keeps reporting, but the overlay can't load and the next connection would fail.
+  const blocked = base && !(await hasSiteAccess(base));
+  const { status, unread, counts = [], problems = [] } = blocked ? { status: 'error' } : message;
   const perAccount = counts.map((c) => `\n${c.username}: ${c.unread}`).join('');
   const shown = {
     ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: unread ? `${unread} unread${perAccount}` : 'No unread mail' },
@@ -224,12 +227,8 @@ async function showStatus(message) {
   const count = pause && status === 'ok' ? '' : shown.text;
   action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : shown.color ?? BADGE_COLOR });
   action.setBadgeText({ text: count || (partial ? '!' : '') });
-  let lines = problems.map(describeProblem);
-  if (status !== 'error' || !lines.length) lines.push(shown.title);
-  const { base } = await api.storage.local.get('base');
-  if (status !== 'ok' && base && !(await hasSiteAccess(base))) {
-    lines = [`The extension can no longer reach ${new URL(base).host}. Open Settings to allow it again.`];
-  }
+  const lines = blocked ? [`The extension can no longer reach ${new URL(base).host}. Open Settings to allow it again.`] : problems.map(describeProblem);
+  if (!blocked && (status !== 'error' || !lines.length)) lines.push(shown.title);
   if (pause) lines.unshift(pauseLine(pause));
   action.setTitle({ title: lines.join('\n') });
 
@@ -562,6 +561,8 @@ async function regainAccess({ origins = [] }) {
   start();
 }
 api.permissions.onAdded.addListener(regainAccess);
+// Taken away: show it now, rather than at the next report.
+api.permissions.onRemoved.addListener(() => lastStatus && showStatus(lastStatus));
 
 // Chromium only: each wake-up runs start(), which reopens the offscreen document if it closed.
 if (api.alarms) {
