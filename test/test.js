@@ -539,6 +539,160 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(notify(many, 'minimal'), [{ url: 'inbox', title: '4 new messages', message: '' }]);
   assert.deepStrictEqual(notify(many, 'subject'), [{ url: 'inbox', title: '4 new messages', message: 'To: u\nHi' }]);
 
+  // The overlay says so when Bulwark is slow to load, and stops saying so once it has.
+  const TROUBLE = 'Having trouble connecting to mail.test:8443';
+  const SLOW_LOAD = 5000;
+  const OVERLAY_URL = 'https://mail.test:8443/webmail/mail';
+  const fromExtension = 'moz-extension://x/popup.html';
+  const openPopup = async () => {
+    const elements = {};
+    const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0 };
+    const popupContext = {
+      browser: {
+        storage: { local: { get: async () => ({ base: 'https://mail.test:8443/webmail' }), set: async () => {} } },
+        webRequest: {
+          onCompleted: { addListener: (listener) => { popup.completed = listener; } },
+          onErrorOccurred: { addListener: (listener) => { popup.errored = listener; } },
+        },
+      },
+      document: {
+        documentElement: { style: { setProperty() {} } },
+        getElementById: (id) => (elements[id] ??= {
+          style: {},
+          classList: { add() { popup.revealed = true; }, remove() { popup.revealed = false; } },
+          addEventListener(type, listener) { this.onLoad = listener; },
+          set src(value) { if (id === 'mail') popup.loads += 1; },
+        }),
+      },
+      location: { origin: 'moz-extension://x' },
+      matchMedia: () => ({ matches: false }),
+      setTimeout: (work, ms) => {
+        if (ms < SLOW_LOAD) return setTimeout(work, 0);
+        popup.timers[ms] = work;
+        return ms;
+      },
+      clearTimeout: (ms) => { delete popup.timers[ms]; },
+      setInterval: (work) => {
+        assert.strictEqual(popup.tick, null, 'only one countdown at a time');
+        popup.tick = work;
+        return 1;
+      },
+      clearInterval: () => { popup.tick = null; },
+      URL,
+    };
+    popupContext.globalThis = popupContext;
+    vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/popup.js`, 'utf8'), popupContext);
+    await sleep(20);
+    return popup;
+  };
+  const shown = (popup) => [popup.elements.trouble.textContent ?? '', popup.elements.retry.textContent ?? ''];
+  const ok = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 200, originUrl: fromExtension };
+  const badGateway = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 502, initiator: 'moz-extension://x' };
+  const refused = { type: 'sub_frame', url: OVERLAY_URL, error: 'net::ERR_CONNECTION_REFUSED', initiator: 'moz-extension://x' };
+
+  // A slow page after the server answered gets the message alone, and clears once loaded.
+  let popup = await openPopup();
+  popup.completed(ok);
+  assert.deepStrictEqual(shown(popup), ['', ''], 'nothing shown while loading normally');
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'answered, so no countdown');
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  assert.deepStrictEqual(popup.timers, {}, 'a load in time leaves nothing pending');
+  assert.ok(popup.revealed);
+
+  // No request events at all must still show the mail.
+  popup = await openPopup();
+  await popup.elements.mail.onLoad();
+  assert.ok(popup.revealed);
+
+  // A frame fires load for a 502 too: say so at once and keep the error page hidden, in either order.
+  popup = await openPopup();
+  popup.completed(badGateway);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  await popup.elements.mail.onLoad();
+  assert.ok(!popup.revealed, 'the error page stays hidden');
+  popup = await openPopup();
+  const loading = popup.elements.mail.onLoad();
+  popup.completed(badGateway);
+  await loading;
+  assert.ok(!popup.revealed, 'a report just after load never shows it');
+  popup = await openPopup();
+  await popup.elements.mail.onLoad();
+  popup.completed(badGateway);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.ok(!popup.revealed, 'a much later report hides it again');
+
+  // Bulwark's service worker can report the load as its own request, as Chrome does when the worker has just started.
+  const workerStarted = [{ initiator: 'moz-extension://x' }, { originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' }];
+  for (const report of ['completed', 'errored']) {
+    for (const started of workerStarted) {
+      popup = await openPopup();
+      popup[report]({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 502, error: 'net::ERR_FAILED', ...started });
+      await popup.elements.mail.onLoad();
+      assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s'], report);
+      assert.ok(!popup.revealed, 'the error page stays hidden');
+    }
+  }
+  popup = await openPopup();
+  popup.completed({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' });
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'counts as an answer');
+
+  // The countdown ends in another try, which can fail again or show the mail.
+  popup = await openPopup();
+  popup.completed(badGateway);
+  popup.completed(badGateway);
+  for (let i = 0; i < 14; i++) popup.tick();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 1s']);
+  assert.strictEqual(popup.loads, 1, 'no retry before the countdown ends');
+  popup.tick();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying now']);
+  assert.strictEqual(popup.loads, 2);
+  assert.strictEqual(popup.tick, null);
+  popup.errored(refused);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s'], 'a failed retry counts down again');
+  for (let i = 0; i < 15; i++) popup.tick();
+  assert.strictEqual(popup.loads, 3);
+  popup.completed(ok);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  assert.ok(popup.revealed, 'a retry that works shows the mail');
+
+  // No answer shows the message and countdown together, and a late answer still counts.
+  popup = await openPopup();
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  popup.completed(ok);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'no retry to cut it off');
+  assert.strictEqual(popup.tick, null);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  assert.ok(popup.revealed);
+  popup = await openPopup();
+  popup.timers[SLOW_LOAD]();
+  await popup.elements.mail.onLoad();
+  assert.strictEqual(popup.tick, null, 'a load with no reports stops the countdown too');
+  assert.ok(popup.revealed);
+
+  // A real connection failure counts, but a cancelled load says nothing about the server.
+  popup = await openPopup();
+  popup.errored({ ...refused, error: 'NS_BINDING_ABORTED' });
+  popup.errored({ ...refused, error: 'net::ERR_ABORTED' });
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  popup.errored({ ...refused, error: 'net::ERR_CONNECTION_ABORTED' });
+  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+
+  // Failures in the hidden frame, the extension's other requests, or pages Bulwark opens itself, aren't the overlay's.
+  popup = await openPopup();
+  popup.completed({ ...badGateway, url: 'https://mail.test:8443/webmail/api/version', initiator: 'moz-extension://x' });
+  popup.completed({ ...badGateway, type: 'xmlhttprequest', url: 'https://mail.test:8443/webmail/manifest.webmanifest', initiator: 'moz-extension://x' });
+  popup.completed({ ...badGateway, url: 'https://mail.test:8443/webmail/plugin-sandbox', initiator: 'https://mail.test:8443' });
+  popup.errored({ ...refused, initiator: undefined });
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(shown(popup), ['', '']);
+  assert.ok(popup.revealed);
+
   console.log('all checks passed');
 })().catch((error) => {
   console.error(error);

@@ -7,7 +7,7 @@
   "author": "Lenart Kos",
   "homepage_url": "https://github.com/Lenart12/mail-checker-for-bulwark",
   "icons": { "128": "icon.png" },
-  "permissions": ["storage", "notifications", "contextMenus", "alarms", "offscreen", "scripting", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["storage", "notifications", "contextMenus", "alarms", "offscreen", "scripting", "declarativeNetRequestWithHostAccess", "webRequest"],
   "optional_host_permissions": ["*://*/*"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Mail Checker for Bulwark", "default_icon": "icon.png" },
