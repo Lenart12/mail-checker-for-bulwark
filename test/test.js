@@ -541,15 +541,18 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
 
   // The overlay says so when Bulwark is slow to load, and stops saying so once it has.
   const TROUBLE = 'Having trouble connecting to mail.test:8443';
+  const COUNTDOWN = 'Retrying in 15s';
+  const EXTENSION = 'moz-extension://x';
+  const BASE = 'https://mail.test:8443/webmail';
   const SLOW_LOAD = 5000;
-  const OVERLAY_URL = 'https://mail.test:8443/webmail/mail';
-  const fromExtension = 'moz-extension://x/popup.html';
+  const OVERLAY_URL = `${BASE}/mail`;
+  const fromExtension = `${EXTENSION}/popup.html`;
   const openPopup = async () => {
     const elements = {};
     const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0 };
     const popupContext = {
       browser: {
-        storage: { local: { get: async () => ({ base: 'https://mail.test:8443/webmail' }), set: async () => {} } },
+        storage: { local: { get: async () => ({ base: BASE }), set: async () => {} } },
         webRequest: {
           onResponseStarted: { addListener: (listener) => { popup.responded = listener; } },
           onErrorOccurred: { addListener: (listener) => { popup.errored = listener; } },
@@ -564,7 +567,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
           set src(value) { if (id === 'mail') popup.loads += 1; },
         }),
       },
-      location: { origin: 'moz-extension://x' },
+      location: { origin: EXTENSION },
       matchMedia: () => ({ matches: false }),
       setTimeout: (work, ms) => {
         if (ms < SLOW_LOAD) return setTimeout(work, 0);
@@ -587,8 +590,8 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   };
   const shown = (popup) => [popup.elements.trouble.textContent ?? '', popup.elements.retry.textContent ?? ''];
   const ok = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 200, originUrl: fromExtension };
-  const badGateway = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 502, initiator: 'moz-extension://x' };
-  const refused = { type: 'sub_frame', url: OVERLAY_URL, error: 'net::ERR_CONNECTION_REFUSED', initiator: 'moz-extension://x' };
+  const badGateway = { type: 'sub_frame', url: OVERLAY_URL, statusCode: 502, initiator: EXTENSION };
+  const refused = { type: 'sub_frame', url: OVERLAY_URL, error: 'net::ERR_CONNECTION_REFUSED', initiator: EXTENSION };
 
   // A slow page after the server answered gets the message alone, and clears once loaded.
   let popup = await openPopup();
@@ -609,7 +612,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // A frame fires load for a 502 too: say so at once and keep the error page hidden, in either order.
   popup = await openPopup();
   popup.responded(badGateway);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
   await popup.elements.mail.onLoad();
   assert.ok(!popup.revealed, 'the error page stays hidden');
   popup = await openPopup();
@@ -620,23 +623,23 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup = await openPopup();
   await popup.elements.mail.onLoad();
   popup.responded(badGateway);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
   assert.ok(!popup.revealed, 'a much later report hides it again');
 
   // Bulwark's service worker can report the load as its own request, as Chrome does when the worker has just started.
-  const workerStarted = [{ initiator: 'moz-extension://x' }, { originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' }];
+  const workerStarted = [{ initiator: EXTENSION }, { originUrl: `${BASE}/sw.js?v=1` }];
   for (const report of ['responded', 'errored']) {
     for (const started of workerStarted) {
       popup = await openPopup();
       popup[report]({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 502, error: 'net::ERR_FAILED', ...started });
       await popup.elements.mail.onLoad();
-      assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s'], report);
+      assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], report);
       assert.ok(!popup.revealed, 'the error page stays hidden');
     }
   }
 
   // The browser refuses to show a page the worker answered for, so the overlay loads it again once it's awake.
-  const workerOk = { type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: 'moz-extension://x' };
+  const workerOk = { type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 200, initiator: EXTENSION };
   popup = await openPopup();
   popup.responded(workerOk);
   assert.strictEqual(popup.loads, 1, 'the browser ignores a repeat of a load in flight');
@@ -722,7 +725,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(popup.loads, 2);
   assert.strictEqual(popup.tick, null);
   popup.errored(refused);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s'], 'a failed retry counts down again');
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], 'a failed retry counts down again');
   for (let i = 0; i < 15; i++) popup.tick();
   assert.strictEqual(popup.loads, 3);
   popup.responded(ok);
@@ -733,8 +736,8 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // An answer for that address, such as another tab's, can't stop the retries after a failure.
   popup = await openPopup();
   popup.responded(badGateway);
-  popup.responded({ ...workerOk, originUrl: 'https://mail.test:8443/webmail/sw.js?v=1' });
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  popup.responded({ ...workerOk, originUrl: `${BASE}/sw.js?v=1` });
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
   for (let i = 0; i < 15; i++) popup.tick();
   assert.strictEqual(popup.loads, 2);
   popup.responded(ok);
@@ -745,12 +748,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup = await openPopup();
   popup.responded(ok);
   popup.errored(refused);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
 
   // No answer shows the message and countdown together, and a late answer still counts.
   popup = await openPopup();
   popup.timers[SLOW_LOAD]();
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
   popup.responded(ok);
   assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'no retry to cut it off');
   assert.strictEqual(popup.tick, null);
@@ -769,13 +772,13 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup.errored({ ...refused, error: 'net::ERR_ABORTED' });
   assert.deepStrictEqual(shown(popup), ['', '']);
   popup.errored({ ...refused, error: 'net::ERR_CONNECTION_ABORTED' });
-  assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 15s']);
+  assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
 
   // Failures in the hidden frame, the extension's other requests, or pages Bulwark opens itself, aren't the overlay's.
   popup = await openPopup();
-  popup.responded({ ...badGateway, url: 'https://mail.test:8443/webmail/api/version', initiator: 'moz-extension://x' });
-  popup.responded({ ...badGateway, type: 'xmlhttprequest', url: 'https://mail.test:8443/webmail/manifest.webmanifest', initiator: 'moz-extension://x' });
-  popup.responded({ ...badGateway, url: 'https://mail.test:8443/webmail/plugin-sandbox', initiator: 'https://mail.test:8443' });
+  popup.responded({ ...badGateway, url: `${BASE}/api/version`, initiator: EXTENSION });
+  popup.responded({ ...badGateway, type: 'xmlhttprequest', url: `${BASE}/manifest.webmanifest`, initiator: EXTENSION });
+  popup.responded({ ...badGateway, url: `${BASE}/plugin-sandbox`, initiator: 'https://mail.test:8443' });
   popup.errored({ ...refused, initiator: undefined });
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);

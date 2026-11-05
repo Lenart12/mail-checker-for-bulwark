@@ -1,7 +1,8 @@
 // Runs in Firefox's background page, or Chromium's offscreen document. In Firefox it shares
 // one global scope with background.js, so this can't be called api too.
 const hostApi = globalThis.browser ?? chrome;
-const BRIDGE_SILENCE_MS = 150_000; // Two and a half missed 60s heartbeats.
+const WATCHER_PATH = '/api/version';
+const BRIDGE_SILENCE_MS = 150_000; // Two and a half missed HEARTBEAT_MS beats from bridge.js.
 const FIRST_BEAT_MS = 30_000; // The bridge beats as soon as it loads, so this long means it didn't.
 const BRIDGE_CHECK_MS = 10_000;
 
@@ -21,7 +22,7 @@ function loadWatcher(base) {
   watcherFrame?.remove();
   watcherFrame = document.createElement('iframe');
   // Any small page on Bulwark's origin would do: the bridge only needs the origin and the frame.
-  watcherFrame.src = `${base}/api/version`;
+  watcherFrame.src = `${base}${WATCHER_PATH}`;
   document.body.append(watcherFrame);
   beatDeadline = Date.now() + FIRST_BEAT_MS;
   sendStatus('connecting');
@@ -41,7 +42,7 @@ window.addEventListener('message', (event) => {
 setInterval(() => {
   if (!watcherFrame || Date.now() < beatDeadline) return;
   sendStatus('error');
-  watcherFrame.src = `${watcherBase}/api/version`;
+  watcherFrame.src = `${watcherBase}${WATCHER_PATH}`;
   beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
 }, BRIDGE_CHECK_MS);
 
