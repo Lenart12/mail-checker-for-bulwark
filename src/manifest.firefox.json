@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Mail Checker for Bulwark",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "New mail notifications and a quick mail overlay for your Bulwark webmail. Unofficial.",
   "author": "Lenart Kos",
   "homepage_url": "https://github.com/Lenart12/mail-checker-for-bulwark",
