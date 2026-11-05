@@ -1,4 +1,6 @@
 // Runs the extension's logic against fakes of Bulwark, the mail server and the browser: node test.js
+// Starts as a failure: if a promise here never settles, Node just exits, which would otherwise count as a pass.
+process.exitCode = 1;
 const assert = require('node:assert');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -955,6 +957,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const failedLogin = { username: 'v', problem: 'error', detail: 'x' };
   assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 3, problems: [failedLogin] }), { color: 'amber', text: '3', title: 'Can\'t reach mail: v (x)' });
 
+  process.exitCode = 0;
   console.log('all checks passed');
 })().catch((error) => {
   console.error(error);
