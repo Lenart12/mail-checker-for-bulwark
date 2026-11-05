@@ -7,7 +7,7 @@
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
 ![Tested with Bulwark 1.20.0](https://img.shields.io/badge/tested%20with-Bulwark%201.20.0-informational)
 
-New mail notifications and a quick mail overlay for [Bulwark](https://github.com/bulwarkmail/webmail) webmail, for Firefox and Chromium browsers. Unofficial: not made by the Bulwark project.
+New mail notifications and a quick mail overlay for [Bulwark](https://github.com/bulwarkmail/webmail) webmail, for Firefox and Chromium browsers. Compared with Bulwark's own push notifications, it needs no push relay, and adds an unread count on the toolbar, rules for each account and pausing. Unofficial: not made by the Bulwark project.
 
 - Desktop notification, sound and a wiggling toolbar icon when new mail reaches your Inbox, including mail that arrived while the browser was closed. Clicking a notification opens the message in your Bulwark tab, and notifications go away once the overlay shows your mail or nothing is left unread
 - Unread count on the toolbar icon, with a count for each account in its tooltip. The icon goes grey when there's nothing unread or you aren't connected. Other badges: `…` connecting, `!` can't reach your mail, `?` not logged in
@@ -20,7 +20,7 @@ New mail notifications and a quick mail overlay for [Bulwark](https://github.com
 
 Download the file for your browser from [Releases](https://github.com/Lenart12/mail-checker-for-bulwark/releases).
 
-- **Chromium browsers:** unzip the `.zip`. At `chrome://extensions`, turn on developer mode, click **Load Unpacked** and pick the unzipped folder. It doesn't update by itself.
+- **Chromium browsers:** unzip the `.zip`. At `chrome://extensions`, turn on developer mode, click **Load Unpacked** and pick the unzipped folder. It doesn't update by itself: to update, unzip the new release over the same folder, then click the extension's reload button at `chrome://extensions`.
 - **Firefox-based browsers:** at `about:addons`, click the gear icon, choose **Install Add-on From File** and pick the `.xpi`. It's signed by Mozilla and updates itself.
 
 ## Setup
@@ -98,6 +98,8 @@ Versions follow [Semantic Versioning](https://semver.org). To release, run this 
 ```bash
 ./release.sh 0.2.0
 ```
+
+It opens your editor for the release notes, which go in the tag: what changed for users, any new permissions, and the Bulwark version it was tested with.
 
 ```bash
 git push --follow-tags

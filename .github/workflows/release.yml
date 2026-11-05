@@ -52,7 +52,9 @@ jobs:
             --arg version "$version" \
             --arg link "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$xpi" \
             '{addons: {($id): {updates: [{version: $version, update_link: $link}]}}}' > dist/updates.json
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+          # Checkout leaves the tag without its message, which holds the release notes.
+          git fetch -q --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --notes-from-tag \
             "dist/$xpi" \
             "dist/mail-checker-chrome-$version.zip" \
             dist/updates.json

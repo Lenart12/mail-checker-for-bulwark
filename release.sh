@@ -1,6 +1,6 @@
 #!/bin/sh
 # Usage: ./release.sh 0.2.0
-# Sets the version in both manifests, commits and tags. Pushing the tag starts the release workflow.
+# Sets the version in both manifests, commits and tags, asking for release notes. Pushing the tag starts the release workflow.
 set -e
 cd "$(dirname "$0")"
 
@@ -21,5 +21,7 @@ fi
 node test/test.js
 sed -i -E "s/(\"version\": \")[^\"]+/\1$version/" src/manifest.firefox.json src/manifest.chrome.json
 git commit -q -am "Release $version" --allow-empty
-git tag -a "v$version" -m "Release $version"
+# The tag's message becomes the release notes. Lines starting with # are dropped.
+git tag -a "v$version" -e -m "Release $version" \
+  -m "# What changed for users, any new permissions, and the Bulwark version it was tested with."
 echo "Tagged v$version. To publish it, run: git push --follow-tags"

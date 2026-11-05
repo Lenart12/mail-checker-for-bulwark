@@ -4,6 +4,7 @@
   "version": "0.2.1",
   "description": "New mail notifications and a quick mail overlay for your Bulwark webmail. Unofficial.",
   "minimum_chrome_version": "120",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwVAlJ/ViX+mDR0RKHhX0LZPlHKd2zHUQaLh7nw5ijK6xMYcBZHvhwRNgeUeb7jiwd7cGreSceN591/CplawirO1modUtTTeNKnnyakPzjJcnpDqB1xfdFH4p1ifZt+SJHzDGBdFYQp5Xq0ffu7IRNrL0w33U15M0/cSDWsjN43Fz5g2mdk6C4F87pGwIB20AL4tpNtgmOk00n/RLkkXjD0PIcLG/h49mLVLkSLcJfSiEiwfgoMEkuuIrke0BpWurooj311Xw410IuR6Rj2ISottqFOTrAbTAhp4wNnLKx9gNOLA5DCS6uqwRguTiGYfN7qjPNaJeqmrMpdSiASgfjQIDAQAB",
   "author": "Lenart Kos",
   "homepage_url": "https://github.com/Lenart12/mail-checker-for-bulwark",
   "icons": { "128": "icon.png" },
