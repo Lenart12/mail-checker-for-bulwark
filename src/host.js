@@ -9,6 +9,7 @@ const BRIDGE_CHECK_MS = 10_000;
 let watcherFrame;
 let watcherBase;
 let beatDeadline = 0;
+let frameStuck = false;
 
 function sendStatus(status) {
   const message = { status };
@@ -35,7 +36,9 @@ function playSound(url, volume) {
 }
 
 window.addEventListener('message', (event) => {
-  if (event.data === 'bridge-alive') beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
+  if (event.data !== 'bridge-alive') return;
+  beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
+  frameStuck = false;
 });
 
 // The frame stays on an error page if the server was down when it loaded.
@@ -44,6 +47,7 @@ setInterval(() => {
   sendStatus('error');
   watcherFrame.src = `${watcherBase}${WATCHER_PATH}`;
   beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
+  frameStuck = true;
 }, BRIDGE_CHECK_MS);
 
 // A frame in a background page has no tab id, so this is the only way to reach the bridge.
@@ -51,7 +55,21 @@ function commandWatcher(command) {
   watcherFrame?.contentWindow.postMessage(`bridge-${command}`, '*');
 }
 
+function overlayLoaded(result) {
+  if (result === 'failed') {
+    commandWatcher('refresh');
+  } else if (frameStuck) {
+    frameStuck = false;
+    sendStatus('connecting');
+    watcherFrame.src = `${watcherBase}${WATCHER_PATH}`;
+    beatDeadline = Date.now() + FIRST_BEAT_MS;
+  } else {
+    commandWatcher('recheck');
+  }
+}
+
 hostApi.runtime.onMessage.addListener((msg) => {
+  if (msg.overlayLoad) overlayLoaded(msg.overlayLoad);
   if (msg.play) playSound(msg.play, msg.volume);
   if (msg.command) commandWatcher(msg.command);
 });

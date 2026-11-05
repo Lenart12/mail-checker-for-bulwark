@@ -168,6 +168,7 @@ function run({
   };
   const newMailWithoutPush = (state) => { serverState = state; };
   const refresh = () => listeners.message({ data: 'bridge-refresh' });
+  const recheck = () => listeners.message({ data: 'bridge-recheck' });
   const markRead = () => listeners.message({ data: 'bridge-mark-read' });
   const logInAgainWith = (mode) => {
     store['account-registry'] = JSON.stringify({ state: { accounts: [{
@@ -185,6 +186,7 @@ function run({
     push,
     newMailWithoutPush,
     refresh,
+    recheck,
     markRead,
     logInAgainWith,
     changeRules,
@@ -303,6 +305,33 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   t.refresh();
   await sleep(20);
   assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok', 'the next success clears it');
+
+  // The overlay loading means the server is back, so a failed connection tries again without waiting.
+  t = run({ authMode: 'basic', inboxMail: [], timeScale: 10 });
+  t.failNext('Mailbox/get', 500);
+  await sleep(20);
+  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'error');
+  const callsBefore = t.calls.length;
+  await sleep(50);
+  assert.strictEqual(t.calls.length, callsBefore, 'waiting out the delay');
+  t.recheck();
+  await sleep(20);
+  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
+  const callsWorking = t.calls.length;
+  t.recheck();
+  await sleep(20);
+  assert.strictEqual(t.calls.length, callsWorking, 'nothing to do once working');
+
+  // A problem on a connection that's still open checks again the same way.
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  t.failNext('Email/changes', 500);
+  t.refresh();
+  await sleep(20);
+  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'error');
+  t.recheck();
+  await sleep(20);
+  assert.strictEqual(t.sent.filter((m) => m.status).at(-1).status, 'ok');
 
   // Mail that arrives during a dropped connection alerts once after reconnecting.
   t = run({ authMode: 'basic', inboxMail: ['new1'], timeScale: 0.01 });
@@ -550,9 +579,10 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const fromExtension = `${EXTENSION}/popup.html`;
   const openPopup = async () => {
     const elements = {};
-    const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0 };
+    const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0, hints: [] };
     const popupContext = {
       browser: {
+        runtime: { sendMessage: async ({ overlayLoad }) => { popup.hints.push(overlayLoad); } },
         storage: { local: { get: async () => ({ base: BASE }), set: async () => {} } },
         webRequest: {
           onResponseStarted: { addListener: (listener) => { popup.responded = listener; } },
@@ -755,6 +785,31 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await popup.elements.mail.onLoad();
   assert.ok(popup.revealed);
 
+  // Each result tells the watcher once, however many tries or page changes follow.
+  popup = await openPopup();
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(popup.hints, ['ok']);
+  popup = await openPopup();
+  popup.responded(badGateway);
+  for (let i = 0; i < 15; i++) popup.tick();
+  popup.responded(badGateway);
+  assert.deepStrictEqual(popup.hints, ['failed']);
+  for (let i = 0; i < 15; i++) popup.tick();
+  popup.responded(ok);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(popup.hints, ['failed', 'ok']);
+  popup = await openPopup();
+  popup.timers[SLOW_LOAD]();
+  assert.deepStrictEqual(popup.hints, ['failed'], 'no answer counts too');
+  popup = await openPopup();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  popup.responded(workerOk);
+  await popup.elements.mail.onLoad();
+  assert.deepStrictEqual(popup.hints, [], 'Offline mode says nothing about the server');
+
   // A connection lost partway through the page counts as failed, after an answer too.
   popup = await openPopup();
   popup.responded(ok);
@@ -800,12 +855,18 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   let watcherLoads = 0;
   let watcherCheck;
   let watcherMessage;
+  let hostMessage;
+  const watcherCommands = [];
   const hostStatuses = [];
   const hostContext = {
-    browser: { runtime: { onMessage: { addListener() {} } } },
+    browser: { runtime: { onMessage: { addListener: (listener) => { hostMessage = listener; } } } },
     Date: { now: () => now },
     document: {
-      createElement: () => ({ remove() {}, set src(value) { watcherLoads += 1; } }),
+      createElement: () => ({
+        contentWindow: { postMessage: (command) => watcherCommands.push(command) },
+        remove() {},
+        set src(value) { watcherLoads += 1; },
+      }),
       body: { append() {} },
     },
     handleMessage: ({ status }) => hostStatuses.push(status),
@@ -845,6 +906,27 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   now = 479_999;
   watcherCheck();
   assert.strictEqual(watcherLoads, 4);
+
+  // The overlay's result is a reason to check, sooner than the frame or its connection would.
+  hostStatuses.length = 0;
+  hostMessage({ overlayLoad: 'failed' });
+  assert.deepStrictEqual(watcherCommands, ['bridge-refresh']);
+  assert.strictEqual(watcherLoads, 4, 'the frame stays as it is');
+  now = 480_000;
+  hostMessage({ overlayLoad: 'ok' });
+  assert.strictEqual(watcherLoads, 5, 'a stuck frame loads again at once');
+  assert.deepStrictEqual(hostStatuses, ['connecting']);
+  assert.deepStrictEqual(watcherCommands, ['bridge-refresh']);
+  now = 509_999;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 5);
+  now = 510_000;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 6, 'gets the shorter wait for a first beat');
+  watcherMessage({ data: 'bridge-alive' });
+  hostMessage({ overlayLoad: 'ok' });
+  assert.deepStrictEqual(watcherCommands, ['bridge-refresh', 'bridge-recheck'], 'a running bridge checks for itself');
+  assert.strictEqual(watcherLoads, 6);
 
   // What each status shows on the badge.
   const statusCode = background.slice(background.indexOf('function describeProblem'), background.indexOf('async function iconUrl'));

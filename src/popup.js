@@ -18,7 +18,14 @@ function watchLoad(base, frameUrl) {
   let workerAwake = false;
   let slowTimer;
   let countdown = null;
+  let lastHint = null;
 
+  // The watcher may not have noticed yet, so a load's result is a reason for it to check.
+  const hintWatcher = (overlayLoad) => {
+    if (overlayLoad === lastHint) return;
+    lastHint = overlayLoad;
+    api.runtime.sendMessage({ overlayLoad }).catch(() => {});
+  };
   const showTrouble = () => {
     trouble.textContent = `Having trouble connecting to ${new URL(base).host}`;
   };
@@ -36,6 +43,7 @@ function watchLoad(base, frameUrl) {
   const startCountdown = () => {
     showTrouble();
     openTab.hidden = false;
+    hintWatcher('failed');
     if (countdown) return;
     let seconds = RETRY_SECONDS;
     const tick = () => {
@@ -112,6 +120,7 @@ function watchLoad(base, frameUrl) {
     trouble.textContent = '';
     stopCountdown();
     frame.classList.add('loaded');
+    hintWatcher('ok');
   });
   startLoad();
 }

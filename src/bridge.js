@@ -339,7 +339,9 @@
         watcher.delay = Math.min(watcher.delay * 2, MAX_RECONNECT_DELAY_MS);
         fail(watcher, error);
       }
-      if (!watcher.stopped) await sleep(watcher.delay);
+      if (watcher.stopped) return;
+      await Promise.race([sleep(watcher.delay), new Promise((resolve) => { watcher.wake = resolve; })]);
+      watcher.wake = null;
     }
   }
 
@@ -408,6 +410,16 @@
     }
   }
 
+  // The overlay loaded, so the server is back: don't wait out the delay.
+  function recheckFailing() {
+    for (const watcher of watchers.values()) {
+      if (!watcher.problem) continue;
+      watcher.delay = RECONNECT_DELAY_MS;
+      if (watcher.wake) watcher.wake();
+      else watcher.commands?.refresh().catch((error) => fail(watcher, error));
+    }
+  }
+
   // Scripts match every port of the host, because match patterns can't name one. Only the saved address counts.
   api.storage.local.get(['base', 'accountRules']).then((saved) => {
     if (!location.href.startsWith(`${saved.base}/api/version`)) return;
@@ -416,6 +428,7 @@
       if (event.key === 'account-registry') syncAccounts();
     });
     window.addEventListener('message', (event) => {
+      if (event.data === 'bridge-recheck') recheckFailing();
       const command = /^bridge-(refresh|mark-read)$/.exec(event.data)?.[1];
       if (command) runCommand(command);
     });
