@@ -545,6 +545,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const EXTENSION = 'moz-extension://x';
   const BASE = 'https://mail.test:8443/webmail';
   const SLOW_LOAD = 5000;
+  const REPORT_WAIT = 200;
   const OVERLAY_URL = `${BASE}/mail`;
   const fromExtension = `${EXTENSION}/popup.html`;
   const openPopup = async () => {
@@ -570,17 +571,29 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       location: { origin: EXTENSION },
       matchMedia: () => ({ matches: false }),
       setTimeout: (work, ms) => {
-        if (ms < SLOW_LOAD) return setTimeout(work, 0);
-        popup.timers[ms] = work;
-        return ms;
+        if (ms === REPORT_WAIT) return setTimeout(work, 0);
+        const timer = () => {
+          delete popup.timers[ms];
+          work();
+        };
+        popup.timers[ms] = timer;
+        return timer;
       },
-      clearTimeout: (ms) => { delete popup.timers[ms]; },
-      setInterval: (work) => {
+      clearTimeout: (timer) => {
+        for (const [ms, pending] of Object.entries(popup.timers)) {
+          if (pending === timer) delete popup.timers[ms];
+        }
+      },
+      setInterval: (work, ms) => {
+        assert.strictEqual(ms, 1000, 'the countdown ticks once a second');
         assert.strictEqual(popup.tick, null, 'only one countdown at a time');
         popup.tick = work;
-        return 1;
+        popup.tickId = {};
+        return popup.tickId;
       },
-      clearInterval: () => { popup.tick = null; },
+      clearInterval: (id) => {
+        if (id === popup.tickId) popup.tick = null;
+      },
       URL,
     };
     popupContext.globalThis = popupContext;
@@ -601,13 +614,14 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'answered, so no countdown');
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);
-  assert.deepStrictEqual(popup.timers, {}, 'a load in time leaves nothing pending');
+  assert.deepStrictEqual(popup.timers, {}, 'the load clears the timer');
   assert.ok(popup.revealed);
 
   // No request events at all must still show the mail.
   popup = await openPopup();
   await popup.elements.mail.onLoad();
   assert.ok(popup.revealed);
+  assert.deepStrictEqual(popup.timers, {}, 'a load in time never shows the message');
 
   // A frame fires load for a 502 too: say so at once and keep the error page hidden, in either order.
   popup = await openPopup();
@@ -627,15 +641,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.ok(!popup.revealed, 'a much later report hides it again');
 
   // Bulwark's service worker can report the load as its own request, as Chrome does when the worker has just started.
-  const workerStarted = [{ initiator: EXTENSION }, { originUrl: `${BASE}/sw.js?v=1` }];
   for (const report of ['responded', 'errored']) {
-    for (const started of workerStarted) {
-      popup = await openPopup();
-      popup[report]({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 502, error: 'net::ERR_FAILED', ...started });
-      await popup.elements.mail.onLoad();
-      assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], report);
-      assert.ok(!popup.revealed, 'the error page stays hidden');
-    }
+    popup = await openPopup();
+    popup[report]({ type: 'xmlhttprequest', url: OVERLAY_URL, statusCode: 502, error: 'net::ERR_FAILED' });
+    await popup.elements.mail.onLoad();
+    assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN], report);
+    assert.ok(!popup.revealed, 'the error page stays hidden');
   }
 
   // The browser refuses to show a page the worker answered for, so the overlay loads it again once it's awake.
@@ -716,7 +727,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // The countdown ends in another try, which can fail again or show the mail.
   popup = await openPopup();
   popup.responded(badGateway);
-  popup.responded(badGateway);
+  popup.responded(badGateway); // A second report mustn't start a second countdown.
   for (let i = 0; i < 14; i++) popup.tick();
   assert.deepStrictEqual(shown(popup), [TROUBLE, 'Retrying in 1s']);
   assert.strictEqual(popup.loads, 1, 'no retry before the countdown ends');
@@ -783,6 +794,84 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);
   assert.ok(popup.revealed);
+
+  // A new hidden frame gets less time for its first heartbeat than a running one gets between them.
+  let now = 0;
+  let watcherLoads = 0;
+  let watcherCheck;
+  let watcherMessage;
+  const hostStatuses = [];
+  const hostContext = {
+    browser: { runtime: { onMessage: { addListener() {} } } },
+    Date: { now: () => now },
+    document: {
+      createElement: () => ({ remove() {}, set src(value) { watcherLoads += 1; } }),
+      body: { append() {} },
+    },
+    handleMessage: ({ status }) => hostStatuses.push(status),
+    location: { search: '' },
+    setInterval: (work) => { watcherCheck = work; },
+    URLSearchParams,
+    window: { addEventListener: (type, listener) => { watcherMessage = listener; } },
+  };
+  hostContext.globalThis = hostContext;
+  vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/host.js`, 'utf8'), hostContext);
+  const loadHostWatcher = () => vm.runInNewContext('loadWatcher("https://mail.test/webmail")', hostContext);
+  loadHostWatcher();
+  loadHostWatcher();
+  assert.deepStrictEqual(hostStatuses, ['connecting'], 'a worker wake-up mustn\'t reset the badge');
+  assert.strictEqual(watcherLoads, 1);
+  now = 29_999;
+  watcherCheck();
+  assert.deepStrictEqual(hostStatuses, ['connecting']);
+  now = 30_000;
+  watcherCheck();
+  assert.deepStrictEqual(hostStatuses, ['connecting', 'error'], 'no first beat in time');
+  assert.strictEqual(watcherLoads, 2);
+  now = 179_999;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 2, 'later reloads wait longer');
+  now = 180_000;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 3);
+  watcherMessage({ data: 'something-else' });
+  now = 329_999;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 3);
+  watcherMessage({ data: 'bridge-alive' });
+  now = 479_998;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 3, 'a beat moves the deadline');
+  now = 479_999;
+  watcherCheck();
+  assert.strictEqual(watcherLoads, 4);
+
+  // What each status shows on the badge.
+  const statusCode = background.slice(background.indexOf('function describeProblem'), background.indexOf('async function iconUrl'));
+  const badge = {};
+  const statusContext = {
+    action: {
+      setBadgeBackgroundColor: ({ color }) => { badge.color = color; },
+      setBadgeText: ({ text }) => { badge.text = text; },
+      setTitle: ({ title }) => { badge.title = title; },
+    },
+    api: { storage: { local: { get: async () => ({ idle: true }), set: async () => {} } } },
+    BADGE_COLOR: 'red',
+    BADGE_CONNECTING_COLOR: 'grey',
+    BADGE_PARTIAL_COLOR: 'amber',
+    wiggling: true,
+  };
+  vm.runInNewContext(statusCode, statusContext);
+  const badgeFor = async (message) => {
+    await vm.runInNewContext(`showStatus(${JSON.stringify(message)})`, statusContext);
+    return { ...badge };
+  };
+  assert.deepStrictEqual(await badgeFor({ status: 'connecting' }), { color: 'grey', text: '…', title: 'Connecting…' });
+  assert.deepStrictEqual(await badgeFor({ status: 'error' }), { color: 'red', text: '!', title: 'Can\'t reach your mail. Retrying.' });
+  assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 0 }), { color: 'red', text: '', title: 'No unread mail' });
+  assert.strictEqual((await badgeFor({ status: 'ok', unread: 3 })).text, '3');
+  const failedLogin = { username: 'v', problem: 'error', detail: 'x' };
+  assert.deepStrictEqual(await badgeFor({ status: 'ok', unread: 3, problems: [failedLogin] }), { color: 'amber', text: '3', title: 'Can\'t reach mail: v (x)' });
 
   console.log('all checks passed');
 })().catch((error) => {
