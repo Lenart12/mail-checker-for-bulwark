@@ -121,14 +121,13 @@ function describeProblem({ username, problem, detail }) {
 async function showStatus({ status, unread, problems = [] }) {
   const shown = {
     ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: unread ? 'Mail Checker for Bulwark' : 'No unread mail' },
-    connecting: { text: '…', title: 'Connecting…' },
+    connecting: { text: '…', title: 'Connecting…', color: BADGE_CONNECTING_COLOR },
     'logged-out': { text: '?', title: 'Not logged in. Click to log in to Bulwark.' },
     error: { text: '!', title: 'Can\'t reach your mail. Retrying.' },
   }[status];
   // Some accounts still work: keep their count, and say which ones don't.
   const partial = status === 'ok' && problems.length > 0;
-  const color = status === 'connecting' ? BADGE_CONNECTING_COLOR : partial ? BADGE_PARTIAL_COLOR : BADGE_COLOR;
-  action.setBadgeBackgroundColor({ color });
+  action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : shown.color ?? BADGE_COLOR });
   action.setBadgeText({ text: shown.text || (partial ? '!' : '') });
   action.setTitle({ title: problems.length ? problems.map(describeProblem).join('\n') : shown.title });
 

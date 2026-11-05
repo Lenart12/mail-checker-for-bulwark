@@ -7,8 +7,7 @@ const BRIDGE_CHECK_MS = 10_000;
 
 let watcherFrame;
 let watcherBase;
-let lastBeat = 0;
-let awaitingFirstBeat = false;
+let beatDeadline = 0;
 
 function sendStatus(status) {
   const message = { status };
@@ -24,8 +23,7 @@ function loadWatcher(base) {
   // Any small page on Bulwark's origin would do: the bridge only needs the origin and the frame.
   watcherFrame.src = `${base}/api/version`;
   document.body.append(watcherFrame);
-  lastBeat = Date.now();
-  awaitingFirstBeat = true;
+  beatDeadline = Date.now() + FIRST_BEAT_MS;
   sendStatus('connecting');
 }
 
@@ -36,18 +34,15 @@ function playSound(url, volume) {
 }
 
 window.addEventListener('message', (event) => {
-  if (event.data !== 'bridge-alive') return;
-  lastBeat = Date.now();
-  awaitingFirstBeat = false;
+  if (event.data === 'bridge-alive') beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
 });
 
 // The frame stays on an error page if the server was down when it loaded.
 setInterval(() => {
-  if (!watcherFrame || Date.now() - lastBeat < (awaitingFirstBeat ? FIRST_BEAT_MS : BRIDGE_SILENCE_MS)) return;
+  if (!watcherFrame || Date.now() < beatDeadline) return;
   sendStatus('error');
   watcherFrame.src = `${watcherBase}/api/version`;
-  lastBeat = Date.now();
-  awaitingFirstBeat = false;
+  beatDeadline = Date.now() + BRIDGE_SILENCE_MS;
 }, BRIDGE_CHECK_MS);
 
 // A frame in a background page has no tab id, so this is the only way to reach the bridge.
