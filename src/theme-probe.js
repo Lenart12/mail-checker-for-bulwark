@@ -6,7 +6,8 @@
   let last;
   const remember = () => {
     const background = getComputedStyle(document.documentElement).getPropertyValue('--color-background').trim();
-    if (!background || background === last) return;
+    // Only a colour: anything else, such as url(), would load from elsewhere in the overlay.
+    if (!background || background === last || !CSS.supports('color', background)) return;
     last = background;
     api.storage.local.set({ background });
   };

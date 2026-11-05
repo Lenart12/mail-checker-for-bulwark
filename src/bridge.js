@@ -149,6 +149,12 @@
   }
 
   async function alertNewMail(account, jmap, accountId, inbox, created) {
+    const rule = ruleFor(account.username).notify;
+    if (rule === 'never') return;
+    const settings = await alertSettings(account);
+    const bulwarkAlerts = settings.emailNotificationsEnabled !== false && !settings.doNotDisturb
+      && !isMuted(settings.notificationMutes, accountId, inbox);
+    if (!bulwarkAlerts && rule !== 'always') return;
     // A long absence can leave more than the server takes in one request.
     const list = [];
     for (let i = 0; i < created.length; i += BATCH_SIZE) {
@@ -157,12 +163,6 @@
         properties: ['from', 'subject', 'preview', 'mailboxIds', 'keywords', 'receivedAt'],
       })).list);
     }
-    const rule = ruleFor(account.username).notify;
-    if (rule === 'never') return;
-    const settings = await alertSettings(account);
-    const bulwarkAlerts = settings.emailNotificationsEnabled !== false && !settings.doNotDisturb
-      && !isMuted(settings.notificationMutes, accountId, inbox);
-    if (!bulwarkAlerts && rule !== 'always') return;
     const mail = list
       .filter((email) => email.mailboxIds?.[inbox] && !email.keywords?.$draft && !email.keywords?.$seen)
       // Oldest first, so the newest notification ends up on top. The server's order isn't guaranteed.
@@ -189,6 +189,7 @@
 
   // Saved so that mail that arrives while the browser is closed still alerts at the next start.
   function setEmailState(watcher, state) {
+    if (watcher.stopped) return; // Its login is gone, along with its saved state.
     watcher.emailState = state;
     if (emailStates[watcher.key] === state) return;
     emailStates[watcher.key] = state;
@@ -249,6 +250,7 @@
       while (!watcher.stopped) {
         const chunk = await Promise.race([reader.read(), sleep(STREAM_SILENCE_MS)]);
         if (!chunk || chunk.done) return;
+        watcher.delay = RECONNECT_DELAY_MS; // The stream works, so a drop now reconnects soon.
         buffer += decoder.decode(chunk.value, { stream: true });
         const events = buffer.split('\n\n');
         buffer = events.pop();
@@ -287,8 +289,9 @@
       if (name === 'error') throw Object.assign(new Error(`${method}: ${result.type}`), { jmapType: result.type });
       return result;
     })(), method);
-    const readMailboxes = async () => {
-      const { list } = await jmap('Mailbox/get', { properties: ['role', 'unreadEmails'] });
+    // Once the Inbox is known, only it. If it's gone, the error reconnects, which reads them all again.
+    const readMailboxes = async (known) => {
+      const { list } = await jmap('Mailbox/get', { ids: known ? [known] : null, properties: ['role', 'unreadEmails'] });
       const inbox = list.find((mailbox) => mailbox.role === 'inbox');
       watcher.unread = inbox.unreadEmails;
       // Nothing left unread, so this account's notifications are out of date. Their links end like this.
@@ -305,12 +308,12 @@
 
     // Push events and menu commands take turns, or one message could alert twice.
     const inTurn = (task) => {
-      watcher.queue = (watcher.queue ?? Promise.resolve()).catch(() => {}).then(task);
+      watcher.queue = (watcher.queue ?? Promise.resolve()).catch(() => {}).then(() => (watcher.stopped ? undefined : task()));
       return watcher.queue;
     };
     const sync = async () => {
       await reportNewMail(watcher, jmap, accountId, inbox);
-      inbox = await readMailboxes();
+      inbox = await readMailboxes(inbox);
       watcher.problem = null;
       report();
     };
@@ -337,7 +340,7 @@
     const eventSourceUrl = session.eventSourceUrl || session.capabilities?.[CAPABILITIES[0]]?.eventSourceUrl;
     if (!eventSourceUrl) throw new Error('The server offers no push stream');
     const streamUrl = onServerOrigin(eventSourceUrl, serverUrl)
-      .replace('{types}', '*').replace('{closeafter}', 'no').replace('{ping}', '30');
+      .replace('{types}', 'Email,Mailbox').replace('{closeafter}', 'no').replace('{ping}', '30');
     // The stream may not answer until its first ping, and a dead connection never does.
     const opening = authed(watcher, streamUrl, { headers: { Accept: 'text/event-stream' } });
     const stream = await Promise.race([opening, sleep(STREAM_SILENCE_MS)]);
@@ -346,7 +349,6 @@
       return;
     }
     if (!stream.ok) throw new Error(`Push stream: ${stream.status}`);
-    watcher.delay = RECONNECT_DELAY_MS;
     await readEvents(watcher, stream, accountId, update);
   }
 
@@ -362,9 +364,10 @@
       try {
         await connect(watcher);
       } catch (error) {
-        watcher.delay = Math.min(watcher.delay * 2, MAX_RECONNECT_DELAY_MS);
         fail(watcher, error);
       }
+      // After a clean end too: a stream that closes at once would otherwise reconnect every few seconds, all day.
+      watcher.delay = Math.min(watcher.delay * 2, MAX_RECONNECT_DELAY_MS);
       if (watcher.stopped) return;
       await Promise.race([sleep(watcher.delay), new Promise((resolve) => { watcher.wake = resolve; })]);
       watcher.wake = null;
@@ -484,7 +487,8 @@
     api.storage.onChanged.addListener((changes) => {
       if (!changes.accountRules) return;
       accountRules = changes.accountRules.newValue ?? {};
-      runCommand('refresh');
+      // A failing account has no count to change, and asking again could get the address banned.
+      runCommand('refresh', [...watchers.values()].filter((w) => !w.problem));
     });
     setInterval(heartbeat, HEARTBEAT_MS);
     heartbeat();

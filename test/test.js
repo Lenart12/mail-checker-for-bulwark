@@ -15,6 +15,7 @@ function run({
   lockBusy = false,
   tokenExpired = false,
   streamHangs = false,
+  streamCloses = false,
   secondAccount = false,
   stuckMarkRead = false,
   failingSlots = [],
@@ -84,14 +85,14 @@ function run({
       });
     }
     if (url.includes('/events')) {
-      assert.match(url, /types=\*&closeafter=no&ping=30/);
+      assert.match(url, /types=Email,Mailbox&closeafter=no&ping=30/);
       if (streamHangs) return new Promise(() => {});
       return {
         ok: true,
         status: 200,
         body: {
           getReader: () => ({
-            read: () => new Promise((resolve) => { pushChunk = resolve; }),
+            read: () => (streamCloses ? Promise.resolve({ done: true }) : new Promise((resolve) => { pushChunk = resolve; })),
             cancel: async () => {
               cancelledStreams++;
               pushChunk?.({ done: true });
@@ -428,6 +429,38 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(60);
   assert.strictEqual(mailMessages(t.sent).length, 1);
 
+  // A stream that closes at once, with nothing sent, reconnects less and less often.
+  t = run({ authMode: 'basic', inboxMail: [], streamCloses: true, timeScale: 0.01 });
+  await sleep(300);
+  assert.ok(t.calls.filter((c) => c.url.endsWith('/.well-known/jmap')).length <= 3, 'backs off, unlike every 3s');
+
+  // A login removed while its mail is being checked neither alerts nor brings back its saved state.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], emailStates: {} });
+  await sleep(20);
+  t.push({ Email: 's2' });
+  t.logInAgainWith('oauth');
+  await sleep(20);
+  assert.deepStrictEqual(mailMessages(t.sent), []);
+  assert.ok(!('2:u:basic' in t.savedStates()));
+
+  // Changing a rule doesn't ask again for an account that's failing.
+  t = run({ authMode: 'basic', inboxMail: [] });
+  await sleep(20);
+  t.failNext('Email/changes', 500);
+  t.refresh();
+  await sleep(20);
+  const callsWhileFailing = t.calls.length;
+  t.changeRules({ u: { badge: 'never' } });
+  await sleep(20);
+  assert.strictEqual(t.calls.length, callsWhileFailing);
+
+  // An account set to never notify doesn't fetch its new mail.
+  t = run({ authMode: 'basic', inboxMail: ['new1'], accountRules: { u: { notify: 'never' } } });
+  await sleep(20);
+  t.push({ Email: 's2' });
+  await sleep(20);
+  assert.deepStrictEqual(t.emailGetSizes, []);
+
   // A failed Email/get keeps the baseline, so the alert isn't lost.
   t = run({ authMode: 'basic', inboxMail: ['new1'], timeScale: 0.01 });
   await sleep(20);
@@ -525,7 +558,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.ok(!t.calls.some((c) => c.url.includes('internal.invalid')), 'nothing goes to the reported host');
   assert.ok(t.calls.some((c) => c.url === 'https://jmap.test/api'));
-  assert.ok(t.calls.some((c) => c.url.startsWith('https://jmap.test/events?types=*')));
+  assert.ok(t.calls.some((c) => c.url.startsWith('https://jmap.test/events?types=Email,Mailbox')));
 
   // Bulwark's fallback when the session has no top-level push address.
   t = run({
@@ -537,7 +570,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     },
   });
   await sleep(20);
-  assert.ok(t.calls.some((c) => c.url.startsWith('https://jmap.test/events?types=*')));
+  assert.ok(t.calls.some((c) => c.url.startsWith('https://jmap.test/events?types=Email,Mailbox')));
 
   // A page on another port of the host isn't the saved address, so nothing runs for it.
   t = run({ authMode: 'basic', inboxMail: [], frameUrl: 'https://mail.test:8443/webmail/api/version' });
@@ -786,6 +819,47 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   cues.cleared = [];
   await backgroundContext.clearNotifications();
   assert.strictEqual(cues.cleared.length, 3);
+
+  // Only links on the saved address open, whether from a notification or from storage.
+  const opened = [];
+  const tabContext = { api: { tabs: { query: async () => [], create: ({ url }) => opened.push(url) } }, matchPattern: () => '' };
+  vm.runInNewContext(background.slice(background.indexOf('// An open tab keeps'), background.indexOf('const MENU_ITEMS')), tabContext);
+  await tabContext.showInTab('https://mail.test/webmail', 'https://mail.test/webmail.evil.test/x');
+  await tabContext.showInTab('https://mail.test/webmail', 'https://mail.test/webmail/mail/message/1?slot=2');
+  assert.deepStrictEqual(opened, ['https://mail.test/webmail/mail', 'https://mail.test/webmail/mail/message/1?slot=2']);
+
+  // The framing rule is only saved again when the address changes, not at each worker restart.
+  const dnr = { rules: [], updates: 0 };
+  const ruleContext = {
+    RULE_ID: 1,
+    URL,
+    api: {
+      runtime: { getURL: () => 'moz-extension://x/' },
+      declarativeNetRequest: {
+        getDynamicRules: async () => dnr.rules,
+        updateDynamicRules: async ({ addRules }) => { dnr.updates++; dnr.rules = addRules; },
+      },
+    },
+  };
+  vm.runInNewContext(background.slice(background.indexOf('// Only frames this extension opens'), background.indexOf('async function registerScripts')), ruleContext);
+  await ruleContext.allowFraming('https://mail.test/webmail');
+  await ruleContext.allowFraming('https://mail.test/webmail');
+  assert.strictEqual(dnr.updates, 1);
+  await ruleContext.allowFraming('https://other.test');
+  assert.strictEqual(dnr.updates, 2);
+
+  // The instance icon must come from the Bulwark server.
+  const iconFetches = [];
+  const iconContext = {
+    URL,
+    fetch: async (url) => {
+      iconFetches.push(String(url));
+      return { json: async () => ({ icons: [{ purpose: 'any', src: 'https://tracker.test/icon.png' }] }) };
+    },
+  };
+  vm.runInNewContext(background.slice(background.indexOf('// The web app manifest points'), background.indexOf('async function updateIcon')), iconContext);
+  await assert.rejects(iconContext.fetchInstanceIcon('https://mail.test/webmail'));
+  assert.deepStrictEqual(iconFetches, ['https://mail.test/webmail/manifest.webmanifest']);
 
   // The overlay's message when Bulwark is slow or unreachable.
   const popupHtml = fs.readFileSync(`${__dirname}/../src/popup.html`, 'utf8');
@@ -1288,7 +1362,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       storage: {
         local: {
           get: async (keys) => Object.fromEntries([keys].flat().filter((k) => k in paused.store).map((k) => [k, structuredClone(paused.store[k])])),
-          set: async (items) => { Object.assign(paused.store, structuredClone(items)); },
+          set: async (items) => { paused.writes = (paused.writes ?? 0) + 1; Object.assign(paused.store, structuredClone(items)); },
           remove: async (keys) => { for (const k of [keys].flat()) delete paused.store[k]; },
         },
       },
@@ -1338,6 +1412,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 2 }), 'an account read elsewhere drops out');
   await inPause('clearNotifications()');
   assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 2 }), 'the overlay doesn\'t clear counts');
+  const writes = paused.writes;
+  await inPause("clearNotifications('?slot=9&owner=a')");
+  assert.strictEqual(paused.writes, writes, 'nothing to drop, nothing saved');
 
   paused.now += 60 * 60 * 1000;
   paused.titles = [];

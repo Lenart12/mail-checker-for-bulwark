@@ -32,8 +32,11 @@ function matchPattern(base, path) {
 // Only frames this extension opens lose these headers; normal tabs keep them. It matches on initiator, so frames
 // Bulwark opens inside the overlay keep theirs, which is why plugin frames fail there. The hidden frame needs this
 // too: Bulwark's API routes send X-Frame-Options: DENY.
-function allowFraming(base) {
-  return api.declarativeNetRequest.updateDynamicRules({
+async function allowFraming(base) {
+  // Chromium's worker restarts about every minute, and the rule is saved to disk each time it's set.
+  const rules = await api.declarativeNetRequest.getDynamicRules();
+  if (rules.some((rule) => rule.id === RULE_ID && rule.condition.requestDomains?.[0] === new URL(base).hostname)) return;
+  await api.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: [RULE_ID],
     addRules: [{
       id: RULE_ID,
@@ -160,12 +163,12 @@ async function pauseUntil(choice) {
 }
 
 // Counts of mail that arrived while paused, by Inbox link. Alerts for several accounts can arrive at once, so in turn.
+// change answers whether it changed anything, since clearing runs on every sync with nothing unread.
 let pausedMailQueue = Promise.resolve();
 function updatePausedMail(change) {
   pausedMailQueue = pausedMailQueue.catch(() => {}).then(async () => {
     const { pausedMail = {} } = await api.storage.local.get('pausedMail');
-    change(pausedMail);
-    await api.storage.local.set({ pausedMail });
+    if (change(pausedMail)) await api.storage.local.set({ pausedMail });
   });
   return pausedMailQueue;
 }
@@ -290,7 +293,10 @@ async function showRestingIcon() {
 async function fetchInstanceIcon(base) {
   const manifest = await (await fetch(`${base}/manifest.webmanifest`, { credentials: 'omit' })).json();
   const { src } = manifest.icons.find((icon) => icon.purpose === 'any');
-  const res = await fetch(new URL(src, base), { credentials: 'omit' });
+  const url = new URL(src, base);
+  // The extension only talks to the Bulwark server.
+  if (url.origin !== new URL(base).origin) throw new Error('The icon is on another site');
+  const res = await fetch(url, { credentials: 'omit' });
   const image = await createImageBitmap(await res.blob());
   const canvas = new OffscreenCanvas(ICON_STORED_SIZE, ICON_STORED_SIZE);
   canvas.getContext('2d').drawImage(image, 0, 0, ICON_STORED_SIZE, ICON_STORED_SIZE);
@@ -371,7 +377,9 @@ async function clearNotifications(ending = '') {
   }
   if (ending) {
     await updatePausedMail((pausedMail) => {
-      for (const link of Object.keys(pausedMail)) if (link.endsWith(ending)) delete pausedMail[link];
+      const links = Object.keys(pausedMail).filter((link) => link.endsWith(ending));
+      for (const link of links) delete pausedMail[link];
+      return links.length > 0;
     });
   }
 }
@@ -406,7 +414,10 @@ async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inbo
     await api.storage.local.set({ popupUrl: isActiveAccount ? null : inboxUrl });
     // A pause silences every account, whatever its rules. It's summed up when the pause ends.
     if (await activePause()) {
-      await updatePausedMail((pausedMail) => { pausedMail[inboxUrl] = (pausedMail[inboxUrl] ?? 0) + mail.length; });
+      await updatePausedMail((pausedMail) => {
+        pausedMail[inboxUrl] = (pausedMail[inboxUrl] ?? 0) + mail.length;
+        return true;
+      });
       return;
     }
   }
@@ -464,7 +475,9 @@ action.onClicked.addListener(async () => {
 });
 
 // An open tab keeps what's in it unless given a link. Bulwark asks before leaving a message being written.
-async function showInTab(base, url) {
+// Links come from notification ids and storage, so only ones on the saved address open.
+async function showInTab(base, link) {
+  const url = link?.startsWith(`${base}/`) ? link : undefined;
   const [tab] = await api.tabs.query({ url: matchPattern(base, '/*') });
   if (!tab) {
     api.tabs.create({ url: url ?? `${base}/mail` });
@@ -487,11 +500,20 @@ const PAUSE_MENU = [
   { id: 'pause-separator', type: 'separator' },
   { id: 'pause-end', title: 'Resume notifications', enabled: false },
 ];
-for (const item of [...Object.entries(MENU_ITEMS).map(([id, title]) => ({ id, title })), ...PAUSE_MENU.map((i) => ({ ...i, parentId: 'pause' }))]) {
-  api.contextMenus.create(
-    { ...item, contexts: [api.action ? 'action' : 'browser_action'] },
-    () => void api.runtime.lastError, // Chromium keeps the entries across worker restarts, so these report a duplicate id.
-  );
+function createMenus() {
+  for (const item of [...Object.entries(MENU_ITEMS).map(([id, title]) => ({ id, title })), ...PAUSE_MENU.map((i) => ({ ...i, parentId: 'pause' }))]) {
+    api.contextMenus.create({ ...item, contexts: [api.action ? 'action' : 'browser_action'] });
+  }
+}
+// Chromium keeps the entries across worker restarts, so there only an install or update makes them.
+// start() may have tried to set Resume before then, so set it again.
+if (api.alarms) {
+  api.runtime.onInstalled.addListener(() => {
+    createMenus();
+    showPause();
+  });
+} else {
+  createMenus();
 }
 
 api.contextMenus.onClicked.addListener(async ({ menuItemId }) => {

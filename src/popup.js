@@ -138,7 +138,7 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
   loading.src = icon ?? 'icon.png';
   loading.style.visibility = 'visible';
 
-  watchLoad(base, popupUrl ?? `${base}/mail`);
+  watchLoad(base, popupUrl?.startsWith(`${base}/`) ? popupUrl : `${base}/mail`);
   // Used once: this makes that account the active one, so later opens stay on it.
   if (popupUrl) api.storage.local.set({ popupUrl: null, tabsBehind: true });
 });
