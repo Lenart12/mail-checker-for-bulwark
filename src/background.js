@@ -29,6 +29,11 @@ function matchPattern(base, path) {
   return `${url.protocol}//${url.hostname}${url.pathname.replace(/\/$/, '')}${path}`;
 }
 
+// Site access can be taken away in the browser's extension settings, and then nothing reaches the server.
+function hasSiteAccess(base) {
+  return api.permissions.contains({ origins: [matchPattern(base, '/*')] });
+}
+
 // Only frames this extension opens lose these headers; normal tabs keep them. It matches on initiator, so frames
 // Bulwark opens inside the overlay keep theirs, which is why plugin frames fail there. The hidden frame needs this
 // too: Bulwark's API routes send X-Frame-Options: DENY.
@@ -219,8 +224,12 @@ async function showStatus(message) {
   const count = pause && status === 'ok' ? '' : shown.text;
   action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : shown.color ?? BADGE_COLOR });
   action.setBadgeText({ text: count || (partial ? '!' : '') });
-  const lines = problems.map(describeProblem);
+  let lines = problems.map(describeProblem);
   if (status !== 'error' || !lines.length) lines.push(shown.title);
+  const { base } = await api.storage.local.get('base');
+  if (status !== 'ok' && base && !(await hasSiteAccess(base))) {
+    lines = [`The extension can no longer reach ${new URL(base).host}. Open Settings to allow it again.`];
+  }
   if (pause) lines.unshift(pauseLine(pause));
   action.setTitle({ title: lines.join('\n') });
 

@@ -130,7 +130,18 @@ function watchLoad(base, frameUrl) {
   startLoad();
 }
 
-api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).then(({ base, background, icon, popupUrl, options }) => {
+// Site access can be taken away in the browser's extension settings. Then the frame keeps Bulwark's framing
+// headers and reports no requests, so it would show the browser's own error page.
+function showNoAccess(base) {
+  document.getElementById('loading').style.animation = 'none';
+  document.getElementById('trouble').textContent = `The extension can no longer reach ${new URL(base).host}`;
+  const link = document.getElementById('open-tab');
+  link.textContent = 'Open settings to allow it again';
+  link.href = 'options.html?tab';
+  link.hidden = false;
+}
+
+api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).then(async ({ base, background, icon, popupUrl, options }) => {
   document.documentElement.style.setProperty('--width', POPUP_WIDTHS[options?.overlaySize] ?? POPUP_WIDTHS.compact);
   // Before the first open there's no remembered colour yet, so follow the system.
   const systemBackground = matchMedia('(prefers-color-scheme: dark)').matches ? '#0a0a0a' : '#ffffff';
@@ -140,6 +151,11 @@ api.storage.local.get(['base', 'background', 'icon', 'popupUrl', 'options']).the
   loading.src = icon ?? 'icon.png';
   loading.style.visibility = 'visible';
 
+  const { protocol, hostname } = new URL(base);
+  if (!(await api.permissions.contains({ origins: [`${protocol}//${hostname}/*`] }))) {
+    showNoAccess(base);
+    return;
+  }
   watchLoad(base, popupUrl?.startsWith(`${base}/`) ? popupUrl : `${base}/mail`);
   // Used once: this makes that account the active one, so later opens stay on it.
   if (popupUrl) api.storage.local.set({ popupUrl: null, tabsBehind: true });

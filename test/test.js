@@ -674,7 +674,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       commands: { getAll: async () => [{ name: '_execute_action', shortcut: 'Ctrl+Shift+M' }] },
       runtime: { sendMessage(message) { page.sent.push(message); } },
       tabs: { create({ url }) { page.tabs.push(url); } },
-      permissions: { contains: async () => page.allowed },
+      permissions: { contains: async () => page.allowed, onRemoved: { addListener(fn) { page.accessRemoved = fn; } } },
     },
     fetch: async (url) => ({
       url: url === 'https://mail.test/' ? 'https://mail.test/webmail/en' : url,
@@ -699,6 +699,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
 
   // Site access taken away in the browser says how to get it back. With no accounts, the page links to the login.
   assert.strictEqual(page.elements.status.textContent, 'The extension can no longer reach mail.test. Click Save to allow it again.');
+  page.elements.status.textContent = '';
+  await page.accessRemoved();
+  assert.match(page.elements.status.textContent, /no longer reach/, 'also while the page is open');
   const [logInLink] = page.elements.accounts.children[0].children;
   await logInLink.listeners.click({ preventDefault() {} });
   assert.strictEqual(page.tabs.at(-1), 'https://mail.test/webmail/mail');
@@ -886,13 +889,14 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const REPORT_WAIT = 200;
   const OVERLAY_URL = `${BASE}/mail`;
   const fromExtension = `${EXTENSION}/popup.html`;
-  const openPopup = async (stored = {}) => {
+  const openPopup = async (stored = {}, allowed = true) => {
     const elements = {};
     const popup = { elements, timers: {}, tick: null, revealed: false, loads: 0, hints: [] };
     const popupContext = {
       browser: {
         runtime: { sendMessage: async ({ overlayLoad }) => { popup.hints.push(overlayLoad); } },
         storage: { local: { get: async () => ({ base: BASE, ...stored }), set: async () => {} } },
+        permissions: { contains: async () => allowed },
         webRequest: {
           onResponseStarted: { addListener: (listener) => { popup.responded = listener; } },
           onErrorOccurred: { addListener: (listener) => { popup.errored = listener; } },
@@ -970,6 +974,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(popup.timers, {}, 'the load clears the timer');
   assert.ok(popup.revealed);
   assert.ok(popup.focused, 'keys go to Bulwark at once');
+
+  // Without site access the page can't show here, so say so instead of loading it.
+  popup = await openPopup({}, false);
+  assert.strictEqual(popup.loads, 0);
+  assert.strictEqual(popup.elements.trouble.textContent, 'The extension can no longer reach mail.test:8443');
+  assert.deepStrictEqual([popup.elements['open-tab'].hidden, popup.elements['open-tab'].href], [false, 'options.html?tab']);
 
   // A saved link opens only if it's on the saved address.
   popup = await openPopup({ popupUrl: 'https://evil.test/mail' });
@@ -1338,13 +1348,16 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // What each status shows on the badge.
   const statusCode = background.slice(background.indexOf('function describeProblem'), background.indexOf('async function iconUrl'));
   const badge = {};
+  const access = { base: undefined, removed: false };
   const statusContext = {
     action: {
       setBadgeBackgroundColor: ({ color }) => { badge.color = color; },
       setBadgeText: ({ text }) => { badge.text = text; },
       setTitle: ({ title }) => { badge.title = title; },
     },
-    api: { storage: { local: { get: async () => ({ idle: true }), set: async () => {} } } },
+    api: { storage: { local: { get: async () => ({ idle: true, base: access.base }), set: async () => {} } } },
+    hasSiteAccess: async () => !access.removed,
+    URL,
     BADGE_COLOR: 'red',
     BADGE_CONNECTING_COLOR: 'grey',
     BADGE_PARTIAL_COLOR: 'amber',
@@ -1368,6 +1381,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   const loggedOut = { username: 'v', problem: 'logged-out' };
   assert.strictEqual((await badgeFor({ status: 'logged-out', problems: [loggedOut] })).title, 'Not logged in: v\nNot logged in. Click to log in to Bulwark.', 'says what to do');
   assert.strictEqual((await badgeFor({ status: 'connecting', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)\nConnecting…', 'says the others are connecting');
+  Object.assign(access, { base: 'https://mail.test/webmail', removed: true });
+  assert.strictEqual((await badgeFor({ status: 'error' })).title, 'The extension can no longer reach mail.test. Open Settings to allow it again.', 'names a missing site access');
+  Object.assign(access, { base: undefined, removed: false });
 
   // Pausing: silent for every account, a count per account, and firstInbox summary at the end.
   const paused = { store: { base: 'b' }, created: [], sounds: 0, wiggles: 0, enabled: [], titles: [], now: new Date(2026, 10, 5, 12, 0).getTime() };
@@ -1400,6 +1416,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     },
     getOptions: async () => ({ notificationContent: paused.content ?? 'full', wiggle: true, volume: 50 }),
     iconUrl: async () => 'icon',
+    hasSiteAccess: async () => true,
     showRestingIcon: async () => {},
     wiggle() { paused.wiggles++; },
     tabPlaysSound: async () => false,

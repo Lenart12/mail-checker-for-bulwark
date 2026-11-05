@@ -217,17 +217,21 @@ function showAccounts(accounts = []) {
   }));
 }
 
+// Site access can be taken away in the browser's extension settings, even while this page is open.
+async function showAccess() {
+  const { base } = await api.storage.local.get('base');
+  if (base && !(await api.permissions.contains({ origins: [originPattern(base)] }))) {
+    statusLine.textContent = `The extension can no longer reach ${new URL(base).host}. Click Save to allow it again.`;
+  }
+}
+api.permissions.onRemoved.addListener(showAccess);
+
 api.storage.local.get(['base', 'icon', 'options', 'accounts', 'accountRules']).then(({ base, icon, options, accounts, accountRules: savedRules }) => {
   accountRules = savedRules ?? {};
   showAccounts(accounts);
   if (icon) showIcon(icon);
   if (base) showConnected(base);
-  // Site access can be taken away in the browser's extension settings, which leaves the badge on ! for good.
-  if (base) {
-    api.permissions.contains({ origins: [originPattern(base)] }).then((allowed) => {
-      if (!allowed) statusLine.textContent = `The extension can no longer reach ${new URL(base).host}. Click Save to allow it again.`;
-    });
-  }
+  showAccess();
   for (const [id, value] of Object.entries(options ?? {})) writeOption(id, value);
   showVolume();
   showTestButton();
