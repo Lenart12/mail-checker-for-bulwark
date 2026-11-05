@@ -70,9 +70,9 @@ function watchLoad(base, frameUrl) {
     startCountdown();
   };
 
-  // A frame fires load for an error page too, and can't say which it got, so watch its request. Bulwark's service
-  // worker can take the load over, which reports it as the worker's own request for the same address instead, and
-  // browsers disagree on who started that. Pages Bulwark opens itself don't count, and neither does the hidden frame.
+  // A frame fires load for error pages too, so watch its request. Bulwark's service worker can take the load over,
+  // which shows up as the worker's own request for the same address, and browsers disagree on who started it.
+  // Pages Bulwark opens itself and the hidden frame don't count.
   const isOverlayLoad = (details) => (details.type === 'sub_frame'
     ? (details.originUrl ?? details.initiator)?.startsWith(location.origin) && !details.url.startsWith(`${base}/api/version`)
     : details.url === frameUrl);

@@ -3,7 +3,7 @@
 const hostApi = globalThis.browser ?? chrome;
 const WATCHER_PATH = '/api/version';
 const BRIDGE_SILENCE_MS = 150_000; // Two and a half missed HEARTBEAT_MS beats from bridge.js.
-const FIRST_BEAT_MS = 30_000; // The bridge beats as soon as it loads, so this long means it didn't.
+const FIRST_BEAT_MS = 30_000; // The bridge beats as soon as it loads, so this much silence means it never ran.
 const BRIDGE_CHECK_MS = 10_000;
 
 let watcherFrame;

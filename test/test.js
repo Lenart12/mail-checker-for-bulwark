@@ -259,7 +259,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.strictEqual(t.tokenRenewals(), 0, 'no force while another window renews');
 
-  // Connecting shows first, then the real count at once, even while the stream hasn't answered. 0 is never claimed first.
+  // Connecting shows first, then the real count, even while the stream hasn't answered. Never 0.
   t = run({ authMode: 'basic', inboxMail: [], streamHangs: true });
   await sleep(20);
   assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => [m.status, m.unread]), [['connecting', undefined], ['ok', 7]]);
@@ -539,7 +539,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.deepStrictEqual(notify(many, 'minimal'), [{ url: 'inbox', title: '4 new messages', message: '' }]);
   assert.deepStrictEqual(notify(many, 'subject'), [{ url: 'inbox', title: '4 new messages', message: 'To: u\nHi' }]);
 
-  // The overlay says so when Bulwark is slow to load, and stops saying so once it has.
+  // The overlay's message when Bulwark is slow or unreachable.
   const TROUBLE = 'Having trouble connecting to mail.test:8443';
   const COUNTDOWN = 'Retrying in 15s';
   const EXTENSION = 'moz-extension://x';
@@ -766,7 +766,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   popup.timers[SLOW_LOAD]();
   assert.deepStrictEqual(shown(popup), [TROUBLE, COUNTDOWN]);
   popup.responded(ok);
-  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'no retry to cut it off');
+  assert.deepStrictEqual(shown(popup), [TROUBLE, ''], 'answered, so no countdown');
   assert.strictEqual(popup.tick, null);
   await popup.elements.mail.onLoad();
   assert.deepStrictEqual(shown(popup), ['', '']);
