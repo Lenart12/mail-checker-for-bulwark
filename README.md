@@ -9,6 +9,8 @@
 
 New mail notifications and a quick mail overlay for [Bulwark](https://github.com/bulwarkmail/webmail) webmail, for Firefox and Chromium browsers. Compared with Bulwark's own push notifications, it needs no push relay, and adds an unread count on the toolbar, rules for each account and pausing. Unofficial: not made by the Bulwark project.
 
+![The overlay open from the toolbar icon in Chrome, showing two unread messages in Bulwark's Inbox](.github/screenshot.png)
+
 - Desktop notification, sound and a wiggling toolbar icon when new mail reaches your Inbox, including mail that arrived while the browser was closed. Clicking a notification opens the message in your Bulwark tab, and notifications go away once the overlay shows your mail or nothing is left unread
 - Unread count on the toolbar icon, with a count for each account in its tooltip. The icon goes grey when there's nothing unread or you aren't connected. Other badges: `…` connecting, `!` can't reach your mail, `?` not logged in
 - Click the icon to read mail in an overlay, using Bulwark's own interface. You can also give it a keyboard shortcut in your browser's extension shortcut settings
