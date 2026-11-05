@@ -95,7 +95,10 @@
     const res = await pageFetch(`${base}/api/auth/session?slot=${account.cookieSlot}`, { method: 'PUT' });
     if (!res.ok) throw new AuthError(res.status);
     const { token, username, password } = await parsed(res);
-    return token ? `Bearer ${token}` : `Basic ${btoa(`${username}:${password}`)}`;
+    if (token) return `Bearer ${token}`;
+    // UTF-8, as Bulwark and Stalwart use. btoa alone is Latin-1, and throws on letters such as č.
+    const bytes = new TextEncoder().encode(`${username}:${password}`);
+    return `Basic ${btoa(String.fromCharCode(...bytes))}`;
   }
 
   async function authed(watcher, url, init = {}) {
@@ -428,8 +431,11 @@
     report();
   }
 
+  // The extension's page that holds this frame. Nothing else may command it, or hear from it.
+  const EXTENSION_ORIGIN = api.runtime.getURL('').replace(/\/$/, '');
+
   function heartbeat() {
-    window.parent.postMessage('bridge-alive', '*');
+    window.parent.postMessage('bridge-alive', EXTENSION_ORIGIN);
     syncAccounts();
   }
 
@@ -469,6 +475,7 @@
       if (event.key === 'account-registry') syncAccounts();
     });
     window.addEventListener('message', (event) => {
+      if (event.origin !== EXTENSION_ORIGIN) return;
       const command = /^bridge-(refresh|mark-read|check|recheck)$/.exec(event.data)?.[1];
       if (command === 'check') checkWorking();
       else if (command === 'recheck') recheckFailing();

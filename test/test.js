@@ -28,6 +28,7 @@ function run({
   sessionOverrides = {},
   emailStates,
   startState = 's1',
+  password = 'p',
 }) {
   const calls = [];
   const emailGetSizes = [];
@@ -69,10 +70,11 @@ function run({
     }
     if (url.includes('/api/auth/session')) {
       if (failingSlots.some((slot) => url.includes(`slot=${slot}`))) return json(401, {});
-      return json(200, { username: 'u', password: 'p' });
+      return json(200, { username: 'u', password });
     }
     if (authMode === 'oauth' && init.headers?.Authorization !== validAuth) return json(401, {});
     if (basicRefused && init.headers?.Authorization?.startsWith('Basic')) return json(402, {});
+    if (init.headers?.Authorization?.startsWith('Basic') && init.headers.Authorization !== `Basic ${Buffer.from(`u:${password}`).toString('base64')}`) return json(401, {});
     if (url.endsWith('/.well-known/jmap')) {
       return json(200, {
         primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acc1' },
@@ -141,7 +143,7 @@ function run({
     'settings-storage': JSON.stringify({ state: settings }),
   };
   const context = {
-    window: { parent: { postMessage: (message) => posted.push(message) }, addEventListener: (type, fn) => { listeners[type] = fn; } },
+    window: { parent: { postMessage: (message, target) => posted.push(`${message} ${target}`) }, addEventListener: (type, fn) => { listeners[type] = fn; } },
     location: { href: frameUrl },
     localStorage: { getItem: (key) => store[key] ?? null },
     navigator: {
@@ -155,7 +157,7 @@ function run({
       },
     },
     chrome: {
-      runtime: { sendMessage: async (message) => { sent.push(message); } },
+      runtime: { sendMessage: async (message) => { sent.push(message); }, getURL: (path) => `moz-extension://ext/${path}` },
       storage: {
         local: {
           get: async () => ({ accountRules, emailStates, base: 'https://mail.test/webmail' }),
@@ -172,6 +174,7 @@ function run({
     matchMedia: () => ({ matches: false }),
     encodeURIComponent,
     TextDecoder,
+    TextEncoder,
     URL,
     console,
   };
@@ -186,10 +189,10 @@ function run({
     });
   };
   const newMailWithoutPush = (state) => { serverState = state; };
-  const refresh = () => listeners.message({ data: 'bridge-refresh' });
-  const check = () => listeners.message({ data: 'bridge-check' });
-  const recheck = () => listeners.message({ data: 'bridge-recheck' });
-  const markRead = () => listeners.message({ data: 'bridge-mark-read' });
+  const refresh = () => listeners.message({ data: 'bridge-refresh', origin: 'moz-extension://ext' });
+  const check = () => listeners.message({ data: 'bridge-check', origin: 'moz-extension://ext' });
+  const recheck = () => listeners.message({ data: 'bridge-recheck', origin: 'moz-extension://ext' });
+  const markRead = (origin = 'moz-extension://ext') => listeners.message({ data: 'bridge-mark-read', origin });
   const logInAgainWith = (mode) => {
     store['account-registry'] = JSON.stringify({ state: { accounts: [{
       cookieSlot: 2, username: 'u', serverUrl: 'https://jmap.test', authMode: mode, rememberMe: true,
@@ -306,9 +309,17 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.strictEqual(mailMessages(t.sent).length, 1, 'refresh racing a push must not alert twice');
 
-  // Mark all as read works through every batch, and the badge follows.
+  // A password with letters past Latin-1 still logs in, encoded as UTF-8.
+  t = run({ authMode: 'basic', inboxMail: [], password: 'geslo-čü€' });
+  await sleep(20);
+  assert.ok(t.sent.some((m) => m.status === 'ok' && m.unread === 7));
+
+  // Mark all as read works through every batch, and the badge follows. Only the extension can ask.
   t = run({ authMode: 'basic', inboxMail: [] });
   await sleep(20);
+  t.markRead('https://evil.test');
+  await sleep(20);
+  assert.strictEqual(t.marked.length, 0, 'a message from another site is ignored');
   t.markRead();
   await sleep(20);
   assert.strictEqual(t.marked.length, 7);
@@ -402,7 +413,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // The host needs this beat, and must allow more time than the beats take.
   t = run({ authMode: 'basic', inboxMail: [] });
   await sleep(20);
-  assert.deepStrictEqual(t.posted, ['bridge-alive']);
+  assert.deepStrictEqual(t.posted, ['bridge-alive moz-extension://ext'], 'only to the extension');
   const constantIn = (file, name) => Number(new RegExp(`${name} = ([\\d_]+)`).exec(fs.readFileSync(`${__dirname}/../src/${file}`, 'utf8'))[1].replaceAll('_', ''));
   assert.ok(constantIn('host.js', 'BRIDGE_SILENCE_MS') > constantIn('bridge.js', 'HEARTBEAT_MS') * 2);
   assert.ok(constantIn('host.js', 'FIRST_BEAT_MS') > constantIn('host.js', 'BRIDGE_CHECK_MS'));
@@ -1140,7 +1151,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       Date: { now: () => now },
       document: {
         createElement: () => ({
-          contentWindow: { postMessage: (command) => host.commands.push(command) },
+          contentWindow: { postMessage: (command, target) => { host.commands.push(command); host.target = target; } },
           remove() {},
           set src(value) { host.loads += 1; },
         }),
@@ -1149,6 +1160,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
       handleMessage: ({ status }) => host.statuses.push(status),
       location: { search: '' },
       setInterval: (work) => { host.check = work; },
+      URL,
       URLSearchParams,
       window: { addEventListener: (type, listener) => { host.windowMessage = listener; } },
     };
@@ -1191,6 +1203,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   host = openHost();
   host.message({ overlayLoad: 'failed' });
   assert.deepStrictEqual(host.commands, ['bridge-check']);
+  assert.strictEqual(host.target, 'https://mail.test', 'only to Bulwark');
   assert.strictEqual(host.loads, 1, 'the frame stays as it is');
   host.message({ overlayLoad: 'ok' });
   assert.deepStrictEqual(host.commands, ['bridge-check', 'bridge-recheck'], 'a frame not yet late checks for itself');
@@ -1253,7 +1266,10 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual((await badgeFor({ status: 'ok', unread: 3 })).title, '3 unread');
   const counts = [{ username: 'u', unread: 2 }, { username: 'v', unread: 1 }];
   assert.strictEqual((await badgeFor({ status: 'ok', unread: 3, counts })).title, '3 unread\nu: 2\nv: 1', 'counts each account');
-  assert.strictEqual((await badgeFor({ status: 'logged-out', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)', 'no count when none work');
+  assert.strictEqual((await badgeFor({ status: 'error', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)', 'no count when none work');
+  const loggedOut = { username: 'v', problem: 'logged-out' };
+  assert.strictEqual((await badgeFor({ status: 'logged-out', problems: [loggedOut] })).title, 'Not logged in: v\nNot logged in. Click to log in to Bulwark.', 'says what to do');
+  assert.strictEqual((await badgeFor({ status: 'connecting', problems: [failedLogin] })).title, 'Can\'t reach mail: v (x)\nConnecting…', 'says the others are connecting');
 
   // Pausing: silent for every account, a count per account, and firstInbox summary at the end.
   const paused = { store: { base: 'b' }, created: [], sounds: 0, wiggles: 0, enabled: [], titles: [], now: new Date(2026, 10, 5, 12, 0).getTime() };
@@ -1370,6 +1386,11 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(paused.store.pause.until, tomorrow.setHours(8, 0, 0, 0));
   await inPause("showStatus({ status: 'ok', unread: 0 })");
   assert.match(paused.titles.at(-1), /^Notifications paused until tomorrow /);
+  paused.now = new Date(2026, 10, 6, 0, 30).getTime();
+  await inPause("pauseUntil('pause-tomorrow')");
+  assert.strictEqual(paused.store.pause.until, new Date(2026, 10, 6, 8, 0).getTime(), 'just after midnight, this morning');
+  await inPause("showStatus({ status: 'ok', unread: 0 })");
+  assert.match(paused.titles.at(-1), /^Notifications paused until (?!tomorrow)/);
   await inPause("pauseUntil('pause-30m')");
   assert.strictEqual(paused.store.pause.until, paused.now + 30 * 60 * 1000);
 

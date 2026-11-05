@@ -55,7 +55,7 @@ setInterval(() => {
 
 // A frame in a background page has no tab id, so this is the only way to reach the bridge.
 function commandWatcher(command) {
-  watcherFrame?.contentWindow.postMessage(`bridge-${command}`, '*');
+  watcherFrame?.contentWindow.postMessage(`bridge-${command}`, new URL(watcherBase).origin);
 }
 
 function overlayLoaded(result) {

@@ -131,7 +131,8 @@ const PAUSE_CHOICES = {
   'pause-8h': ['For 8 hours', hoursLater(8)],
   'pause-tomorrow': ['Until tomorrow morning', (now) => {
     const end = new Date(now);
-    end.setDate(end.getDate() + 1);
+    // Just after midnight, tomorrow morning is this morning.
+    if (end.getHours() >= 5) end.setDate(end.getDate() + 1);
     return end.setHours(8, 0, 0, 0);
   }],
   'pause-indefinitely': ['Until I resume', () => null],
@@ -216,7 +217,7 @@ async function showStatus(message) {
   action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : shown.color ?? BADGE_COLOR });
   action.setBadgeText({ text: count || (partial ? '!' : '') });
   const lines = problems.map(describeProblem);
-  if (status === 'ok' || !lines.length) lines.push(shown.title);
+  if (status !== 'error' || !lines.length) lines.push(shown.title);
   if (pause) lines.unshift(pauseLine(pause));
   action.setTitle({ title: lines.join('\n') });
 
@@ -505,11 +506,11 @@ api.contextMenus.onClicked.addListener(async ({ menuItemId }) => {
   else api.runtime.sendMessage({ command: menuItemId }).catch(() => {});
 });
 
-// The id is the link. It selects that message's account, which other open tabs don't follow until they reload.
+// The id is the link. One with a slot selects that message's account, which other open tabs don't follow until they reload.
 api.notifications.onClicked.addListener(async (id) => {
   api.notifications.clear(id);
   const { base } = await api.storage.local.get('base');
-  await api.storage.local.set({ tabsBehind: true });
+  if (id.includes('slot=')) await api.storage.local.set({ tabsBehind: true });
   showInTab(base, id);
 });
 
