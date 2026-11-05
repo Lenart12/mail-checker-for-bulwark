@@ -147,7 +147,10 @@ def prepared_extension(folder):
 const report = (m) => fetch('{ORIGIN}/msg?m=' + encodeURIComponent(JSON.stringify(m)));
 browser.runtime.onMessage.addListener((m) => {{ if (m.status || m.mail) report(m); }});
 addEventListener('unhandledrejection', (e) => report({{ unhandled: String(e.reason) }}));
-browser.commands.getAll().then((commands) => report({{ commands: commands.map((c) => c.name) }}));
+browser.commands.getAll().then((commands) => report({{
+  commands: commands.map((c) => c.name),
+  openShortcutSettings: typeof browser.commands.openShortcutSettings,
+}}));
 const createMenu = browser.contextMenus.create;
 browser.contextMenus.create = (props, done) => createMenu(props, () => {{
   if (browser.runtime.lastError) report({{ menuError: `${{props.id}}: ${{browser.runtime.lastError.message}}` }});
@@ -271,6 +274,8 @@ def failures(locks_during_token_request):
             found.append(f'expected only the summary between pausing and resuming: {notified}')
     if not any('_execute_browser_action' in message.get('commands', []) for message in messages):
         found.append('the toolbar shortcut is not offered')
+    if not any(message.get('openShortcutSettings') == 'function' for message in messages):
+        found.append('the settings page can\'t open Firefox\'s shortcut settings')
     if LOGIN_METHOD == 'oauth' and 'bulwark-token-refresh:0' not in locks_during_token_request:
         found.append(f'the lock was not held during the token request: {locks_during_token_request}')
     rules = json.loads(RULES).get('test@x', {})

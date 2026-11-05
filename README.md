@@ -32,11 +32,21 @@ Accounts come from whatever you're logged in to, and several accounts work at on
 
 ## Options
 
+Notifications and sound:
+
 - **Desktop notifications:** sender, subject and preview; sender and subject; just "New mail"; or off
-- **Overlay size:** one pane (599px) or a wider layout (800px)
+- **Sound volume:** for sounds the extension plays. An open Bulwark tab that can play the sound uses its own volume
+- **Send a test notification:** alerts with a made-up email, following your options, to check that your browser and system let notifications through. Hidden while notifications are off
+
+Toolbar icon:
+
 - **Clicking the icon:** opens the overlay, or Bulwark in a tab
 - **Icon wiggle:** on or off. It also stays still if your system asks for reduced motion
-- **Sound volume:** for sounds the extension plays. An open Bulwark tab that can play the sound uses its own volume
+- **Keyboard shortcut:** shows the shortcut for the toolbar icon, if any, and opens your browser's shortcut settings to change it
+
+Overlay:
+
+- **Overlay size:** one pane (599px) or a wider layout (800px)
 
 Each account also has its own rules, which appear once you're logged in:
 

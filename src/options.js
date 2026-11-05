@@ -119,13 +119,52 @@ async function previewVolume() {
   audio.play().catch(() => {});
 }
 
+// With notifications off there's nothing to test.
+function showTestButton() {
+  document.getElementById('testArea').hidden = readOption('notificationContent') === 'off';
+}
+
 for (const id of OPTION_IDS) {
   document.getElementById(id).addEventListener('change', () => {
     api.storage.local.set({ options: Object.fromEntries(OPTION_IDS.map((key) => [key, readOption(key)])) });
     if (id === 'volume') previewVolume();
+    if (id === 'notificationContent') showTestButton();
   });
 }
 document.getElementById('volume').addEventListener('input', showVolume);
+
+// A made-up email through the same alert as real mail, so it follows the options above. Clicking it opens the mail.
+document.getElementById('testNotification').addEventListener('click', async () => {
+  const { base } = await api.storage.local.get('base');
+  api.runtime.sendMessage({
+    test: true,
+    mail: [{
+      from: 'Mail Checker for Bulwark',
+      subject: 'Test message',
+      preview: 'New mail will look like this. Click to open your mail.',
+      url: `${base}/mail`,
+    }],
+    base,
+    sound: 'involved-notification.mp3',
+    inboxUrl: `${base}/mail`,
+    reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+  });
+});
+
+async function showShortcut() {
+  const commands = await api.commands.getAll();
+  const icon = commands.find((c) => c.name === '_execute_action' || c.name === '_execute_browser_action');
+  document.getElementById('shortcutKeys').textContent = icon?.shortcut || 'Not set';
+}
+
+// Chromium has no call for this and opens its page instead.
+document.getElementById('setShortcut').addEventListener('click', () => {
+  if (api.commands.openShortcutSettings) api.commands.openShortcutSettings();
+  else api.tabs.create({ url: 'chrome://extensions/shortcuts' });
+});
+// Coming back from the shortcut settings.
+window.addEventListener('focus', showShortcut);
+showShortcut();
 
 const RULE_LABELS = { always: 'Always', unmuted: 'When not muted', never: 'Never' };
 const DEFAULT_RULES = { notify: 'unmuted', badge: 'always' };
@@ -175,6 +214,7 @@ api.storage.local.get(['base', 'icon', 'options', 'accounts', 'accountRules']).t
   if (base) showConnected(base);
   for (const [id, value] of Object.entries(options ?? {})) writeOption(id, value);
   showVolume();
+  showTestButton();
 });
 
 api.storage.onChanged.addListener(({ icon, accounts }) => {

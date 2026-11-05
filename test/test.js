@@ -605,16 +605,28 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(own.isActiveAccount, true);
 
   // Connecting follows a redirect to the real address, however the path is written.
+  const page = { elements: {}, sent: [], tabs: [], openedShortcuts: 0 };
   const optionsContext = {
     URL,
     Set,
     location: { search: '' },
+    window: { addEventListener() {} },
+    matchMedia: () => ({ matches: false }),
     document: {
       documentElement: { classList: { toggle() {} } },
-      getElementById: () => ({ addEventListener() {}, replaceChildren() {} }),
+      getElementById: (id) => (page.elements[id] ??= {
+        listeners: {},
+        addEventListener(type, fn) { this.listeners[type] = fn; },
+        replaceChildren() {},
+      }),
       createElement: () => ({}),
     },
-    chrome: { storage: { local: { get: async () => ({}) }, onChanged: { addListener() {} } } },
+    chrome: {
+      storage: { local: { get: async () => ({ base: 'https://mail.test/webmail' }), set: async () => {} }, onChanged: { addListener() {} } },
+      commands: { getAll: async () => [{ name: '_execute_action', shortcut: 'Ctrl+Shift+M' }] },
+      runtime: { sendMessage(message) { page.sent.push(message); } },
+      tabs: { create({ url }) { page.tabs.push(url); } },
+    },
     fetch: async (url) => ({
       url: url === 'https://mail.test/' ? 'https://mail.test/webmail/en' : url,
       ok: url.endsWith('/webmail/api/version') || url.endsWith('/mail/api/version'),
@@ -635,6 +647,29 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   assert.strictEqual(await find('https://mail.test/mail'), 'https://mail.test/mail', 'sub-path that looks like a page');
   optionsContext.fetch = async (url) => ({ url, ok: false, json: async () => ({}) });
   assert.strictEqual(await find('https://not-bulwark.test/'), null);
+
+  // The test button sends a made-up email through the real alert, linking to the mail. The shortcut line shows the key.
+  await page.elements.testNotification.listeners.click();
+  const [testAlert] = page.sent;
+  assert.strictEqual(testAlert.test, true);
+  assert.strictEqual(testAlert.mail.length, 1);
+  assert.strictEqual(testAlert.mail[0].url, 'https://mail.test/webmail/mail');
+  assert.strictEqual(testAlert.sound, 'involved-notification.mp3');
+  page.elements.notificationContent.value = 'off';
+  page.elements.notificationContent.listeners.change();
+  assert.strictEqual(page.elements.testArea.hidden, true, 'no test button with notifications off');
+  page.elements.notificationContent.value = 'minimal';
+  page.elements.notificationContent.listeners.change();
+  assert.strictEqual(page.elements.testArea.hidden, false);
+  assert.strictEqual(page.elements.shortcutKeys.textContent, 'Ctrl+Shift+M');
+  page.elements.setShortcut.listeners.click();
+  assert.deepStrictEqual(page.tabs, ['chrome://extensions/shortcuts'], 'Chromium gets its shortcut page');
+  optionsContext.chrome.commands.openShortcutSettings = () => { page.openedShortcuts++; };
+  page.elements.setShortcut.listeners.click();
+  assert.strictEqual(page.openedShortcuts, 1, 'Firefox opens its own');
+  optionsContext.chrome.commands.getAll = async () => [{ name: '_execute_browser_action', shortcut: '' }];
+  await vm.runInNewContext('showShortcut()', optionsContext);
+  assert.strictEqual(page.elements.shortcutKeys.textContent, 'Not set');
 
   // Per-account notification rules against Bulwark's own settings.
   const alertWith = async (rule, settings) => {
@@ -1309,6 +1344,12 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   paused.now += 365 * 24 * 60 * 60 * 1000;
   await Promise.all([alertFor(firstInbox, 1), alertFor(secondInbox, 1)]);
   assert.strictEqual(paused.created.length, 0, 'still paused a year later');
+  paused.store.popupUrl = 'kept';
+  await inPause(`alertMail(${JSON.stringify({ test: true, mail: [{ from: 'T', subject: 'S', preview: '', url: 'b/mail' }], base: 'b', sound: 's.mp3', inboxUrl: 'b/mail' })})`);
+  assert.deepStrictEqual(paused.created, ['b/mail T'], 'a test alert shows during a pause');
+  assert.strictEqual(JSON.stringify(paused.store.pausedMail), JSON.stringify({ [firstInbox]: 1, [secondInbox]: 1 }), 'and isn\'t counted');
+  assert.strictEqual(paused.store.popupUrl, 'kept', 'and chooses no account');
+  paused.created = [];
   await inPause('endPause()');
   assert.deepStrictEqual(paused.created, ['b/mail 2 new messages while paused']);
   paused.created = [];

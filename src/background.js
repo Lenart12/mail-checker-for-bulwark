@@ -397,14 +397,17 @@ async function tabPlaysSound(base, tabMayAlert) {
 
 let lastWiggle = 0;
 let lastSound = 0;
-async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inboxUrl, reducedMotion }) {
+// A test from the settings page alerts like real mail, but isn't held by a pause and doesn't choose an account.
+async function alertMail({ mail, base, sound, isActiveAccount, tabMayAlert, inboxUrl, reducedMotion, test }) {
   const options = await getOptions();
-  // The next overlay or tab opens the account this mail is for.
-  await api.storage.local.set({ popupUrl: isActiveAccount ? null : inboxUrl });
-  // A pause silences every account, whatever its rules. It's summed up when the pause ends.
-  if (await activePause()) {
-    await updatePausedMail((pausedMail) => { pausedMail[inboxUrl] = (pausedMail[inboxUrl] ?? 0) + mail.length; });
-    return;
+  if (!test) {
+    // The next overlay or tab opens the account this mail is for.
+    await api.storage.local.set({ popupUrl: isActiveAccount ? null : inboxUrl });
+    // A pause silences every account, whatever its rules. It's summed up when the pause ends.
+    if (await activePause()) {
+      await updatePausedMail((pausedMail) => { pausedMail[inboxUrl] = (pausedMail[inboxUrl] ?? 0) + mail.length; });
+      return;
+    }
   }
   const icon = await iconUrl();
   for (const { url, title, message } of notifications(mail, inboxUrl, options.notificationContent)) {
