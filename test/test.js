@@ -843,6 +843,24 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await tabContext.showInTab('https://mail.test/webmail', 'https://mail.test/webmail/mail/message/1?slot=2');
   assert.deepStrictEqual(opened, ['https://mail.test/webmail/mail', 'https://mail.test/webmail/mail/message/1?slot=2']);
 
+  // Site access given back for the saved address reconnects at once; another host's access doesn't.
+  const regained = { loads: [], starts: 0 };
+  const accessContext = {
+    URL,
+    api: {
+      storage: { local: { get: async () => ({ base: 'https://mail.test/webmail' }) } },
+      permissions: { onAdded: { addListener() {} } },
+    },
+    loadWatcher: (base, again) => regained.loads.push(`${base} ${again}`),
+    start: () => { regained.starts++; },
+  };
+  accessContext.globalThis = accessContext;
+  vm.runInNewContext(background.slice(background.indexOf('// Site access given back'), background.indexOf('// Chromium only: each wake-up')), accessContext);
+  await accessContext.regainAccess({ origins: ['*://other.test/*'] });
+  assert.deepStrictEqual([regained.loads, regained.starts], [[], 0]);
+  await accessContext.regainAccess({ origins: ['*://mail.test/*'] });
+  assert.deepStrictEqual([regained.loads, regained.starts], [['https://mail.test/webmail true'], 1]);
+
   // The framing rule is only saved again when the address changes, not at each worker restart.
   const dnr = { rules: [], updates: 0 };
   const ruleContext = {
@@ -1274,7 +1292,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
     };
     context.globalThis = context;
     vm.runInNewContext(fs.readFileSync(`${__dirname}/../src/host.js`, 'utf8'), context);
-    host.load = (base = 'https://mail.test/webmail') => vm.runInNewContext(`loadWatcher("${base}")`, context);
+    host.load = (base = 'https://mail.test/webmail', again = false) => vm.runInNewContext(`loadWatcher("${base}", ${again})`, context);
     host.after = (ms) => {
       now += ms;
       host.check();
@@ -1287,6 +1305,9 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   host.load();
   assert.deepStrictEqual(host.statuses, ['connecting'], 'a repeat for the same address mustn\'t reset the badge');
   assert.strictEqual(host.loads, 1);
+  host.load(undefined, true);
+  assert.strictEqual(host.loads, 2, 'unless asked to load again');
+  host = openHost();
   host.after(FIRST_BEAT - 1);
   assert.deepStrictEqual(host.statuses, ['connecting']);
   host.after(1);

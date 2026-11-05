@@ -24,8 +24,9 @@ function loadFrame(status, waitMs) {
   beatDeadline = Date.now() + waitMs;
 }
 
-function loadWatcher(base) {
-  if (watcherFrame && base === watcherBase) return;
+// again: load a fresh frame for the same address too.
+function loadWatcher(base, again = false) {
+  if (watcherFrame && base === watcherBase && !again) return;
   watcherBase = base;
   watcherFrame?.remove();
   watcherFrame = document.createElement('iframe');

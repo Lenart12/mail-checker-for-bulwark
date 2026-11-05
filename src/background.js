@@ -552,6 +552,17 @@ api.storage.onChanged.addListener(async (changes) => {
   start();
 });
 
+// Site access given back, say with Save: connect now, rather than after the next missed heartbeat.
+// Another host's access, as when connecting to a new address, is left to the address change.
+async function regainAccess({ origins = [] }) {
+  const { base } = await api.storage.local.get('base');
+  if (!base || !origins.some((origin) => origin.includes(`//${new URL(base).hostname}/`))) return;
+  if (globalThis.loadWatcher) loadWatcher(base, true);
+  else if (await api.offscreen.hasDocument()) await api.offscreen.closeDocument();
+  start();
+}
+api.permissions.onAdded.addListener(regainAccess);
+
 // Chromium only: each wake-up runs start(), which reopens the offscreen document if it closed.
 if (api.alarms) {
   api.alarms.create('keep-watcher-running', { periodInMinutes: 1 });
