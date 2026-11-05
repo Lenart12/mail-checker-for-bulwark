@@ -364,7 +364,10 @@
       send({ status: failing[0].problem, problems: failing.map(describe) });
       return;
     }
-    if (working.some((w) => w.unread === undefined)) return; // Still connecting: don't claim 0.
+    if (working.some((w) => w.unread === undefined)) {
+      send({ status: 'connecting', problems: failing.map(describe) }); // Don't claim 0.
+      return;
+    }
     send({
       status: 'ok',
       unread: working.reduce((sum, w) => sum + badgeCount(w), 0),

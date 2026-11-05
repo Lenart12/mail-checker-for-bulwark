@@ -259,10 +259,10 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   await sleep(20);
   assert.strictEqual(t.tokenRenewals(), 0, 'no force while another window renews');
 
-  // The real count shows at once, even while the stream hasn't answered, and 0 is never claimed first.
+  // Connecting shows first, then the real count at once, even while the stream hasn't answered. 0 is never claimed first.
   t = run({ authMode: 'basic', inboxMail: [], streamHangs: true });
   await sleep(20);
-  assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => m.unread), [7]);
+  assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => [m.status, m.unread]), [['connecting', undefined], ['ok', 7]]);
 
   // Check for new mail finds it with no push, and racing a push still alerts once.
   t = run({ authMode: 'basic', inboxMail: ['new1'] });
@@ -383,7 +383,7 @@ const mailMessages = (sent) => sent.filter((m) => m.mail);
   // Two logins add up on the badge, once both have answered.
   t = run({ authMode: 'basic', inboxMail: [], secondAccount: true });
   await sleep(20);
-  assert.deepStrictEqual(t.sent.filter((m) => m.status).map((m) => m.unread).filter((n) => n !== 14), [], 'no partial count');
+  assert.deepStrictEqual(t.sent.filter((m) => m.status === 'ok').map((m) => m.unread).filter((n) => n !== 14), [], 'no partial count');
   assert.ok(t.sent.some((m) => m.unread === 14));
 
   // One login failing keeps the other's count and alerts, and says which one failed.

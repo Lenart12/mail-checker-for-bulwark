@@ -10,7 +10,7 @@
 New mail notifications and a quick mail overlay for [Bulwark](https://github.com/bulwarkmail/webmail) webmail, for Firefox and Chromium browsers. Unofficial: not made by the Bulwark project.
 
 - Desktop notification, sound and a wiggling toolbar icon when new mail reaches your Inbox, while the browser is open
-- Unread count on the toolbar icon, which goes grey when there's nothing unread or you aren't connected
+- Unread count on the toolbar icon, which goes grey when there's nothing unread or you aren't connected. A `…` badge means it's connecting, `!` that it can't reach your mail, and `?` that you aren't logged in
 - Click the icon to read mail in an overlay, using Bulwark's own interface
 - Right-click the icon to open mail, start a new message, check for mail, mark the Inbox as read, or open settings
 - Uses your Bulwark server's icon, sounds and notification settings

@@ -5,6 +5,7 @@ const RULE_ID = 1;
 const MAX_SEPARATE_NOTIFICATIONS = 3;
 const BADGE_COLOR = '#d93025';
 const BADGE_PARTIAL_COLOR = '#b45309';
+const BADGE_CONNECTING_COLOR = '#6b7280';
 const DEFAULT_OPTIONS = {
   notificationContent: 'full',
   overlaySize: 'compact',
@@ -119,13 +120,15 @@ function describeProblem({ username, problem, detail }) {
 
 async function showStatus({ status, unread, problems = [] }) {
   const shown = {
-    ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: 'Mail Checker for Bulwark' },
+    ok: { text: unread > 999 ? '999+' : unread ? String(unread) : '', title: unread ? 'Mail Checker for Bulwark' : 'No unread mail' },
+    connecting: { text: '…', title: 'Connecting…' },
     'logged-out': { text: '?', title: 'Not logged in. Click to log in to Bulwark.' },
     error: { text: '!', title: 'Can\'t reach your mail. Retrying.' },
   }[status];
   // Some accounts still work: keep their count, and say which ones don't.
   const partial = status === 'ok' && problems.length > 0;
-  action.setBadgeBackgroundColor({ color: partial ? BADGE_PARTIAL_COLOR : BADGE_COLOR });
+  const color = status === 'connecting' ? BADGE_CONNECTING_COLOR : partial ? BADGE_PARTIAL_COLOR : BADGE_COLOR;
+  action.setBadgeBackgroundColor({ color });
   action.setBadgeText({ text: shown.text || (partial ? '!' : '') });
   action.setTitle({ title: problems.length ? problems.map(describeProblem).join('\n') : shown.title });
 
